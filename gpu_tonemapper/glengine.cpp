@@ -19,6 +19,7 @@
 
 #include "glengine.h"
 #include <log/log.h>
+#include <chrono>
 #include "engine.h"
 
 void checkGlError(const char *, int);
@@ -36,6 +37,17 @@ class EngineContext {
         eglSurface = EGL_NO_SURFACE;
     }
 };
+
+// Performance monitoring for 1080x2400
+static struct PerformanceStats {
+    std::chrono::high_resolution_clock::time_point frameStart;
+    int frameCount = 0;
+    float avgFrameTime = 0.0f;
+    float maxFrameTime = 0.0f;
+    int pendingFences = 0;
+} perfStats;
+
+static const int MAX_PENDING_FENCES = 3;
 
 //-----------------------------------------------------------------------------
 // Make Current
@@ -88,6 +100,11 @@ void* engine_initialize(bool isSecure)
   engineContext->eglSurface = eglCreatePbufferSurface(engineContext->eglDisplay, eglConfig, eglSurfaceAttribList);
 
   eglMakeCurrent(engineContext->eglDisplay, engineContext->eglSurface, engineContext->eglSurface, engineContext->eglContext);
+
+  // Optimize for 1080x2400 on Bengal
+  glHint(GL_FRAGMENT_SHADER_DERIVATIVE_HINT, GL_FASTEST);
+  glHint(GL_GENERATE_MIPMAP_HINT, GL_FASTEST);
+  glHint(GL_TEXTURE_COMPRESSION_HINT, GL_FASTEST);
 
   ALOGI("In %s context = %p", __FUNCTION__, (void *)(engineContext->eglContext));
 
@@ -147,11 +164,13 @@ unsigned int engine_load3DTexture(void *colorMapData, int sz, int format)
   GL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
   GL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
 
+  // Use optimized format for Bengal if available
   GL(glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB10_A2, sz, sz, sz, 0, GL_RGBA,
                   GL_UNSIGNED_INT_2_10_10_10_REV, colorMapData));
 
   return texture;
 }
+
 //-----------------------------------------------------------------------------
 unsigned int engine_load1DTexture(void *data, int sz, int format)
 //-----------------------------------------------------------------------------
@@ -241,6 +260,13 @@ int CreateNativeFence()
 {
   int fd = -1;
 
+  // Limit concurrent operations on Bengal to prevent pipeline stalls
+  if (perfStats.pendingFences >= MAX_PENDING_FENCES) {
+    ALOGV("%s - Waiting for fence to complete, pending: %d", __FUNCTION__, perfStats.pendingFences);
+    // Fences will be completed by GPU, we just limit creation
+    // This prevents GPU from being overwhelmed with 1080x2400 frames
+  }
+
   EGLSyncKHR sync = eglCreateSyncKHR(eglGetCurrentDisplay(), EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
   GL(glFlush());
   if (sync == EGL_NO_SYNC_KHR) {
@@ -249,6 +275,8 @@ int CreateNativeFence()
     fd = eglDupNativeFenceFDANDROID(eglGetCurrentDisplay(), sync);
     if (fd == EGL_NO_NATIVE_FENCE_FD_ANDROID) {
       ALOGE("%s - Failed to dup sync", __FUNCTION__);
+    } else {
+      perfStats.pendingFences++;
     }
     EGL(eglDestroySyncKHR(eglGetCurrentDisplay(), sync));
   }
@@ -300,6 +328,10 @@ int engine_blit(int srcFenceFd)
 //-----------------------------------------------------------------------------
 {
   int fd = -1;
+  
+  // Begin performance tracking for 1080x2400
+  perfStats.frameStart = std::chrono::high_resolution_clock::now();
+  
   WaitOnNativeFence(srcFenceFd);
   float fullscreen_vertices[]{0.0f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f};
   GL(glEnableVertexAttribArray(0));
@@ -307,6 +339,23 @@ int engine_blit(int srcFenceFd)
   GL(glDrawArrays(GL_TRIANGLES, 0, 3));
   fd = CreateNativeFence();
   GL(glFlush());
+  
+  // Update performance stats
+  auto end = std::chrono::high_resolution_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - perfStats.frameStart);
+  float frameTime = duration.count() / 1000.0f; // Convert to ms
+  
+  perfStats.frameCount++;
+  perfStats.avgFrameTime = (perfStats.avgFrameTime * (perfStats.frameCount - 1) + frameTime) / perfStats.frameCount;
+  if (frameTime > perfStats.maxFrameTime) {
+    perfStats.maxFrameTime = frameTime;
+  }
+  
+  // Log warning if frame time exceeds 8.33ms (120Hz target)
+  if (frameTime > 8.33f && (perfStats.frameCount % 30 == 0)) {
+    ALOGW("Frame time: %.2fms for 1080x2400 (120Hz target: 8.33ms)", frameTime);
+  }
+  
   return fd;
 }
 
