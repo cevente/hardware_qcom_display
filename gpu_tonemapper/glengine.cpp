@@ -104,7 +104,6 @@ void* engine_initialize(bool isSecure)
   // Optimize for 1080x2400 on Bengal
   glHint(GL_FRAGMENT_SHADER_DERIVATIVE_HINT, GL_FASTEST);
   glHint(GL_GENERATE_MIPMAP_HINT, GL_FASTEST);
-  glHint(GL_TEXTURE_COMPRESSION_HINT, GL_FASTEST);
 
   ALOGI("In %s context = %p", __FUNCTION__, (void *)(engineContext->eglContext));
 
