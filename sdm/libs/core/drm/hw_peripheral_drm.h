@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2017-2024 The Linux Foundation. All rights reserved.
+Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
 Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
 */
 
@@ -11,6 +11,7 @@ Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
 #include <sys/time.h>
 #include "hw_device_drm.h"
 
+// HDR EOTF Constants
 #ifndef HDR_EOTF_SMTPE_ST2084
 #define HDR_EOTF_SMTPE_ST2084 2
 #endif
@@ -38,7 +39,7 @@ class HWPeripheralDRM : public HWDeviceDRM, public PanelFeaturePropertyIntf {
   virtual int GetPanelFeature(PanelFeaturePropertyInfo *feature_info);
   virtual int SetPanelFeature(const PanelFeaturePropertyInfo &feature_info);
   
-  // Public methods for AMOLED panel management
+  // Custom AMOLED tracking
   bool IsHDRActive() const { return hdr_active_; }
   uint32_t GetCurrentRefreshRate() const { return current_refresh_rate_; }
 
@@ -69,7 +70,6 @@ class HWPeripheralDRM : public HWDeviceDRM, public PanelFeaturePropertyIntf {
   virtual DisplayError SetBLScale(uint32_t level);
   virtual DisplayError GetPanelBrightnessBasePath(std::string *base_path);
   virtual DisplayError DelayFirstCommit();
-  virtual DisplayError SetBlendSpace(const PrimariesTransfer &blend_space);
 
  private:
   void InitDestScaler();
@@ -87,19 +87,11 @@ class HWPeripheralDRM : public HWDeviceDRM, public PanelFeaturePropertyIntf {
   }
   void CacheDestScalarData();
   void PopulateBitClkRates();
-  
-  // HDR Related methods
+
+  // HDR Passthrough and Metadata
   DisplayError UpdateHDRMetaData(HWLayers *hw_layers);
   void DumpHDRMetaData(HWHDRLayerInfo::HDROperation operation);
   void InitMaxHDRMetaData();
-  
-  // Refresh Rate Management
-  bool IsRefreshRateSupported(uint32_t refresh_rate);
-  
-  // Luminance helpers - static for internal use
-  static int32_t GetEOTF(const GammaTransfer &transfer);
-  static float GetMaxOrAverageLuminance(float luminance);
-  static float GetMinLuminance(float luminance, float max_luminance);
 
   struct DestScalarCache {
     SDEScaler scalar_data = {};
@@ -117,38 +109,29 @@ class HWPeripheralDRM : public HWDeviceDRM, public PanelFeaturePropertyIntf {
   std::vector<uint64_t> bitclk_rates_;
   std::string brightness_base_path_ = "";
   std::map<PanelFeaturePropertyID, sde_drm::DRMPanelFeatureID> panel_feature_property_map_ {};
-  
-  // Refresh rate management
+
+  // Custom Tracking Attributes
   uint32_t current_refresh_rate_ = 60;
   uint32_t target_refresh_rate_ = 60;
   bool refresh_rate_change_pending_ = false;
   
-  // Brightness and HDR management
-  int current_brightness_ = 0;
-  int target_brightness_ = 0;
-  bool brightness_change_pending_ = false;
-  bool hdr_brightness_boost_ = false;
-  
-  // HDR state
+  bool hdr_active_ = false;
+  bool hdr_plus_supported_ = false;
+  bool reset_hdr_flag_ = false;
+  bool in_multiset_ = false;
   drm_msm_ext_hdr_metadata hdr_metadata_ = {};
   struct timeval hdr_reset_start_ = {};
   struct timeval hdr_reset_end_ = {};
-  bool reset_hdr_flag_ = false;
-  bool in_multiset_ = false;
-  bool hdr_active_ = false;
-  bool hdr_plus_supported_ = false;
-  
-  // Power management
-  bool low_power_mode_ = false;
-  bool always_on_display_enabled_ = false;
-  uint32_t idle_timeout_ms_ = 10000;
-  
-  // Panel constants for 1800 nits AMOLED
+
+  int current_brightness_ = 0;
+  int target_brightness_ = 0;
+  bool brightness_change_pending_ = false;
+
+  // Constants for AMOLED
   static const float kDefaultMinLuminance;
   static const float kDefaultMaxLuminance;
   static const float kMinPeakLuminance;
   static const float kMaxPeakLuminance;
-  static const float kHDRBrightnessBoostFactor;
 };
 
 }  // namespace sdm
