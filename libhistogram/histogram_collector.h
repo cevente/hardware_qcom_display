@@ -26,6 +26,8 @@
 #include <array>
 #include <memory>
 
+#include <display/drm/msm_drm_pp.h>
+
 #define HWC2_INCLUDE_STRINGIFICATION
 #define HWC2_USE_CPP11
 #include <hardware/hwcomposer2.h>
@@ -102,11 +104,11 @@ class HistogramCollector {
 
   // State tracking
   uint64_t frame_counter_ = 0;
-  uint64_t static_frame_counter_ = 0;
+  mutable uint64_t static_frame_counter_ = 0;
   std::chrono::steady_clock::time_point last_sample_time_;
   mutable PerformanceMetrics metrics_;
   
-  // For static image detection
+  // For static image detection - HIST_V_SIZE comes from msm_drm_pp.h
   std::array<uint64_t, HIST_V_SIZE> last_frame_data_;
   bool has_last_frame_ = false;
 };
