@@ -92,17 +92,16 @@ static std::array<uint64_t, 8> rebucketTo8Buckets(
   // Ensure HIST_V_SIZE is 256 for NEON optimization
   static_assert(HIST_V_SIZE == 256, "NEON optimization requires HIST_V_SIZE == 256");
   
-  // Process 32 entries per bucket (256/8)
+  // NEON-optimized for 256 entries (32 per bucket)
   for (size_t bucket = 0; bucket < 8; bucket++) {
     uint64x2_t sum_low = vdupq_n_u64(0);
     uint64x2_t sum_high = vdupq_n_u64(0);
     
     size_t start = bucket * 32;
-    // Use array subscripting for proper array access
     for (size_t i = 0; i < 32; i += 4) {
-      // Load 4 uint64_t values at a time using array subscript
-      uint64x2_t a = vld1q_u64(&frame.data[start + i]);
-      uint64x2_t b = vld1q_u64(&frame.data[start + i + 2]);
+      // Use .data() for proper pointer arithmetic with std::array
+      uint64x2_t a = vld1q_u64(frame.data() + start + i);
+      uint64x2_t b = vld1q_u64(frame.data() + start + i + 2);
       sum_low = vaddq_u64(sum_low, a);
       sum_high = vaddq_u64(sum_high, b);
     }
