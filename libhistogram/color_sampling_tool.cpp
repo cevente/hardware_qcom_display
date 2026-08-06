@@ -32,7 +32,11 @@ void show_usage(char *progname) {
             << "\t-h      display this help message\n"
             << "\t-o      write output to specified filename\n"
             << "\t-t NUM  Collect results over NUM seconds, and then exit\n"
-            << "\t-m NUM  Only store the last NUM frames of statistics\n";
+            << "\t-m NUM  Only store the last NUM frames of statistics\n"
+            << "\t-s NUM  Sample every NUM frames (default: 1)\n"
+            << "\t-a      Enable adaptive sampling based on refresh rate (default: on)\n"
+            << "\t-d      Disable adaptive sampling\n"
+            << "\t-v      Verbose output with performance metrics\n";
 }
 
 int main(int argc, char **argv) {
@@ -45,13 +49,36 @@ int main(int argc, char **argv) {
   int c;
   char *output_filename = NULL;
   int timeout = -1;
-  while ((c = getopt(argc, argv, "o:t:h")) != -1) {
+  int sampling_interval = 1;
+  bool adaptive_sampling = true;
+  bool verbose = false;
+  
+  while ((c = getopt(argc, argv, "o:t:m:s:advh")) != -1) {
     switch (c) {
       case 'o':
         output_filename = optarg;
         break;
       case 't':
         timeout = strtol(optarg, NULL, 10);
+        break;
+      case 'm':
+        // Max frames handled in histogram start
+        break;
+      case 's':
+        sampling_interval = strtol(optarg, NULL, 10);
+        if (sampling_interval < 1) {
+          std::cerr << "Sampling interval must be >= 1\n";
+          return EXIT_FAILURE;
+        }
+        break;
+      case 'a':
+        adaptive_sampling = true;
+        break;
+      case 'd':
+        adaptive_sampling = false;
+        break;
+      case 'v':
+        verbose = true;
         break;
       default:
       case 'h':
@@ -61,6 +88,17 @@ int main(int argc, char **argv) {
   }
 
   histogram::HistogramCollector histogram;
+  
+  // Configure sampling
+  histogram.set_sampling_interval(sampling_interval);
+  histogram.set_adaptive_sampling(adaptive_sampling);
+  
+  if (verbose) {
+    std::cout << "Configuration:\n";
+    std::cout << "  Sampling interval: " << sampling_interval << "\n";
+    std::cout << "  Adaptive sampling: " << (adaptive_sampling ? "enabled" : "disabled") << "\n";
+  }
+  
   histogram.start();
 
   bool cancelled_during_wait = false;
@@ -96,6 +134,17 @@ int main(int argc, char **argv) {
     output_file.close();
   } else {
     std::cout << histogram.Dump() << '\n';
+  }
+  
+  if (verbose) {
+    auto metrics = histogram.get_metrics();
+    std::cout << "\nPerformance Summary:\n";
+    std::cout << "  Total frames processed: " << metrics.total_frames_processed << "\n";
+    std::cout << "  Frames skipped: " << metrics.frames_skipped << "\n";
+    std::cout << "  Frames dropped: " << metrics.frames_dropped << "\n";
+    std::cout << "  Processing time (us): " << metrics.processing_time_us << "\n";
+    std::cout << "  Refresh rate: " << metrics.current_refresh_rate << "Hz\n";
+    std::cout << "  Effective sampling rate: " << metrics.effective_sampling_rate << "Hz\n";
   }
 
   return EXIT_SUCCESS;
