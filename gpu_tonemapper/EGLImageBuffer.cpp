@@ -45,14 +45,21 @@ EGLImageKHR create_eglImage(android::sp<android::GraphicBuffer> graphicBuffer)
 EGLImageBuffer::EGLImageBuffer(android::sp<android::GraphicBuffer> graphicBuffer)
 //-----------------------------------------------------------------------------
 {
-  // this->graphicBuffer = graphicBuffer;
   this->eglImageID = create_eglImage(graphicBuffer);
   this->width = graphicBuffer->getWidth();
   this->height = graphicBuffer->getHeight();
 
+  // Optimize for 1080x2400 on Bengal - lazy initialization
   textureID = 0;
   renderbufferID = 0;
   framebufferID = 0;
+  
+  // Add performance hints for 1080x2400 resolution
+  if (width == 1080 && height == 2400) {
+    // Use tiled rendering hints for Bengal
+    glHint(GL_GENERATE_MIPMAP_HINT, GL_FASTEST);
+    glHint(GL_TEXTURE_COMPRESSION_HINT, GL_FASTEST);
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -129,6 +136,12 @@ void EGLImageBuffer::bindAsTexture(int target)
     GL(glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
     GL(glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
     GL(glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+
+    // For 1080x2400, use optimized texture parameters
+    if (width == 1080 && height == 2400) {
+      GL(glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+      GL(glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    }
 
     GL(glEGLImageTargetTexture2DOES(target, eglImageID));
   }
