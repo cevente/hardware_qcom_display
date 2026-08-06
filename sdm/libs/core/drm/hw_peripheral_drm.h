@@ -30,7 +30,7 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 /*
 * Changes from Qualcomm Innovation Center are provided under the following license:
 *
-* Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+* Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted (subject to the limitations in the
@@ -68,7 +68,19 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <vector>
 #include <string>
+#include <sys/time.h>
 #include "hw_device_drm.h"
+
+#ifndef HDR_EOTF_SMTPE_ST2084
+#define HDR_EOTF_SMTPE_ST2084 2
+#endif
+#ifndef HDR_EOTF_HLG
+#define HDR_EOTF_HLG 3
+#endif
+
+#define HDR_DISABLE 0
+#define HDR_ENABLE 1
+#define MIN_HDR_RESET_WAITTIME 2
 
 namespace sdm {
 
@@ -85,6 +97,11 @@ class HWPeripheralDRM : public HWDeviceDRM, public PanelFeaturePropertyIntf {
   virtual PanelFeaturePropertyIntf *GetPanelFeaturePropertyIntf() { return this; }
   virtual int GetPanelFeature(PanelFeaturePropertyInfo *feature_info);
   virtual int SetPanelFeature(const PanelFeaturePropertyInfo &feature_info);
+  
+  // New public methods for AMOLED panel management
+  bool IsHDRActive() const { return hdr_active_; }
+  uint32_t GetCurrentRefreshRate() const { return current_refresh_rate_; }
+
  protected:
   virtual DisplayError Init();
   virtual DisplayError Validate(HWLayers *hw_layers);
@@ -112,6 +129,7 @@ class HWPeripheralDRM : public HWDeviceDRM, public PanelFeaturePropertyIntf {
   virtual DisplayError SetBLScale(uint32_t level);
   virtual DisplayError GetPanelBrightnessBasePath(std::string *base_path);
   virtual DisplayError DelayFirstCommit();
+  virtual DisplayError SetBlendSpace(const PrimariesTransfer &blend_space);
 
  private:
   void InitDestScaler();
@@ -128,6 +146,23 @@ class HWPeripheralDRM : public HWDeviceDRM, public PanelFeaturePropertyIntf {
                               idle_pc_state_);
   }
   void CacheDestScalarData();
+  void PopulateBitClkRates();
+  
+  // HDR Related methods
+  DisplayError UpdateHDRMetaData(HWLayers *hw_layers);
+  void DumpHDRMetaData(HWHDRLayerInfo::HDROperation operation);
+  void InitMaxHDRMetaData();
+  void UpdateDisplayBrightnessForHDR();
+  float MapHDRToBrightness(int hdr_luminance);
+  
+  // Refresh Rate Management
+  DisplayError SmoothRefreshRateTransition(uint32_t from_rate, uint32_t to_rate);
+  bool IsRefreshRateSupported(uint32_t refresh_rate);
+  
+  // Luminance helpers
+  static int32_t GetEOTF(const GammaTransfer &transfer);
+  static float GetMaxOrAverageLuminance(float luminance);
+  static float GetMinLuminance(float luminance, float max_luminance);
 
   struct DestScalarCache {
     SDEScaler scalar_data = {};
@@ -142,10 +177,41 @@ class HWPeripheralDRM : public HWDeviceDRM, public PanelFeaturePropertyIntf {
   std::vector<DestScalarCache> dest_scalar_cache_ = {};
   drm_msm_ad4_roi_cfg ad4_roi_cfg_ = {};
   bool needs_ds_update_ = false;
-  void PopulateBitClkRates();
   std::vector<uint64_t> bitclk_rates_;
   std::string brightness_base_path_ = "";
   std::map<PanelFeaturePropertyID, sde_drm::DRMPanelFeatureID> panel_feature_property_map_ {};
+  
+  // Refresh rate management
+  uint32_t current_refresh_rate_ = 60;
+  uint32_t target_refresh_rate_ = 60;
+  bool refresh_rate_change_pending_ = false;
+  
+  // Brightness and HDR management
+  int current_brightness_ = 0;
+  int target_brightness_ = 0;
+  bool brightness_change_pending_ = false;
+  bool hdr_brightness_boost_ = false;
+  
+  // HDR state
+  drm_msm_ext_hdr_metadata hdr_metadata_ = {};
+  struct timeval hdr_reset_start_ = {};
+  struct timeval hdr_reset_end_ = {};
+  bool reset_hdr_flag_ = false;
+  bool in_multiset_ = false;
+  bool hdr_active_ = false;
+  bool hdr_plus_supported_ = false;
+  
+  // Power management
+  bool low_power_mode_ = false;
+  bool always_on_display_enabled_ = false;
+  uint32_t idle_timeout_ms_ = 10000;
+  
+  // Panel constants for 1800 nits AMOLED
+  static const float kDefaultMinLuminance;
+  static const float kDefaultMaxLuminance;
+  static const float kMinPeakLuminance;
+  static const float kMaxPeakLuminance;
+  static const float kHDRBrightnessBoostFactor;
 };
 
 }  // namespace sdm
