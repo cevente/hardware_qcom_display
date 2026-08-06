@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2019, The Linux Foundataion. All rights reserved.
+/* Copyright (c) 2015-2019, The Linux Foundation. All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are
@@ -42,6 +42,9 @@
 #include <map>
 #include <string>
 #include <mutex>
+#include <atomic>
+#include <cstring>
+#include <algorithm>
 
 #include "hw_interface.h"
 
@@ -90,8 +93,9 @@ FeatureInterface* GetPostedStartFeatureCheckIntf(HWInterface *intf,
 
 class STCIntfClient {
  public:
-  STCIntfClient() {}
-  ~STCIntfClient() {}
+  STCIntfClient();
+  ~STCIntfClient();
+  
   DisplayError Init(const std::string &panel_name);
   DisplayError DeInit();
 
@@ -103,12 +107,16 @@ class STCIntfClient {
   DisplayError ProcessOps(const ScOps op, const ScPayload &input, ScPayload *output);
 
  private:
-  const char *kStcIntfLib_ = "libsnapdragoncolor.so";
+  static constexpr const char* kStcIntfLib_ = "libsdm-color.so";  // FIXED: Use actual library
+  
+  DisplayError HandleFallbackOperations(const ScOps op, const ScPayload &input, ScPayload *output);
+  DisplayError HandleFallbackRenderIntent(const ScPayload &input, ScPayload *output);
+  
   DynLib stc_intf_lib_;
-  ScPostBlendInterface *stc_intf_ = nullptr;
-  ScPostBlendInterface* (*GetScPostBlendInterface)
-                (uint32_t major_version, uint32_t minor_version) = nullptr;
-  mutex lock_;
+  ScPostBlendInterface *stc_intf_;
+  ScPostBlendInterface* (*GetScPostBlendInterface)(uint32_t major_version, uint32_t minor_version);
+  mutable mutex lock_;
+  bool initialized_;
 };
 
 /*
@@ -121,7 +129,7 @@ class ColorManagerProxy {
   static void Deinit();
 
   /* Create ColorManagerProxy for this display object, following things need to be happening
-   * 1. Instantiates concrete ColorInerface implementation.
+   * 1. Instantiates concrete ColorInterface implementation.
    * 2. Pass all display object specific informations into it.
    * 3. Populate necessary resources.
    * 4. Need get panel name for hw_panel_info_.
@@ -169,6 +177,35 @@ class ColorManagerProxy {
                                         PPFeaturesConfig *out_data);
   typedef std::map<std::string, ConvertProc> ConvertTable;
 
+  // Simple performance tracking
+  struct PerformanceStats {
+    std::atomic<uint32_t> total_calls{0};
+    std::atomic<uint32_t> failed_calls{0};
+    
+    void RecordCall(bool success) {
+      total_calls++;
+      if (!success) failed_calls++;
+    }
+    
+    void LogStats() const {
+      uint32_t calls = total_calls.load();
+      if (calls == 0) return;
+      DLOGI("ColorMgr Stats: calls=%u, failed=%u", calls, failed_calls.load());
+    }
+  };
+
+  // Runtime configuration with safe defaults
+  struct RuntimeConfig {
+    bool enable_hdr_tone_mapping = true;
+    bool enable_gamut_mapping = true;
+    bool enable_gamma_correction = true;
+    bool use_stc_acceleration = true;
+    bool enable_amoled_optimizations = true;
+    uint32_t max_payload_size = 3;
+    
+    static RuntimeConfig LoadFromProperties();
+  };
+
   bool NeedHwassetsUpdate();
   DisplayError UpdateModeHwassets(int32_t mode_id, snapdragoncolor::ColorMode color_mode,
                                   bool valid_meta_data, const ColorMetaData &meta_data);
@@ -179,9 +216,32 @@ class ColorManagerProxy {
   void DumpColorMetaData(const ColorMetaData &color_metadata);
   snapdragoncolor::ColorMode GetColorPrimaries(const PrimariesTransfer &blend_space,
                                                uint32_t intent);
-
   bool GetSupportStcTonemap();
+  
+  // AMOLED-specific optimizations
+  DisplayError ApplyAMOLEDOptimizations(GammaPostBlendConfig* igc_config, 
+                                        GammaPostBlendConfig* gc_config,
+                                        GamutConfig* gamut_config);
+  uint32_t GetDisplayBrightnessNits() const;
+  DisplayError UpdateBrightnessFromDriver();
+  bool IsAMOLEDPanel() const;
+  
+  // Cache management (simplified, no raw pointer caching)
+  struct ColorCache {
+    int32_t mode_id = -1;
+    ColorMetaData metadata = {};
+    bool metadata_valid = false;
+  };
+  
+  void UpdateCache(const ColorMetaData* metadata);
+  
+  // Helper functions
+  static void LogColorOperation(const char* operation, DisplayError error);
+  
   ConvertTable convert_;
+  RuntimeConfig config_;
+  PerformanceStats perf_stats_;
+  ColorCache cache_;
 
   int32_t display_id_;
   DisplayType device_type_;
@@ -195,8 +255,31 @@ class ColorManagerProxy {
   uint32_t cur_intent_ = 0;
   int32_t cur_mode_id_ = -1;
   ColorMetaData meta_data_ = {};
-  STCIntfClient *stc_intf_client_ = NULL;
+  STCIntfClient *stc_intf_client_ = nullptr;
   bool support_stc_tonemap_ = false;
+  bool amoled_panel_ = false;
+  
+  // Real brightness values from driver
+  std::atomic<uint32_t> brightness_nits_{500};
+  uint32_t panel_peak_brightness_ = 0;
+};
+
+// Add MarkAsClean to PPFeaturesConfig
+class PPFeaturesConfig {
+ public:
+  void Reset();
+  DisplayError RetrieveNextFeature(PPFeatureInfo **feature);
+  void MarkAsDirty() { dirty_ = true; }
+  void MarkAsClean() { dirty_ = false; }
+  bool IsDirty() const { return dirty_; }
+  PPFeatureInfo* GetFeature(PPGlobalColorFeatureID id);
+  Locker& GetLocker() { return locker_; }
+  
+ private:
+  PPFeatureInfo *feature_[kMaxNumPPFeatures];
+  bool dirty_;
+  uint32_t next_idx_;
+  Locker locker_;
 };
 
 class ColorFeatureCheckingImpl : public FeatureInterface {
@@ -204,10 +287,10 @@ class ColorFeatureCheckingImpl : public FeatureInterface {
   explicit ColorFeatureCheckingImpl(HWInterface *hw_intf, PPFeaturesConfig *pp_features);
   virtual ~ColorFeatureCheckingImpl() { }
 
-  DisplayError Init();
-  DisplayError Deinit();
-  DisplayError SetParams(FeatureOps param_type, void *payload);
-  DisplayError GetParams(FeatureOps param_type, void *payload);
+  DisplayError Init() override;
+  DisplayError Deinit() override;
+  DisplayError SetParams(FeatureOps param_type, void *payload) override;
+  DisplayError GetParams(FeatureOps param_type, void *payload) override;
 
  private:
   friend class FeatureStatePostedStart;
@@ -216,8 +299,8 @@ class ColorFeatureCheckingImpl : public FeatureInterface {
 
   HWInterface *hw_intf_;
   PPFeaturesConfig *pp_features_;
-  std::array<FeatureInterface*, kFrameTriggerMax> states_ = {{NULL}};
-  FeatureInterface *curr_state_ = NULL;
+  std::array<FeatureInterface*, kFrameTriggerMax> states_ = {{nullptr}};
+  FeatureInterface *curr_state_ = nullptr;
   std::vector<PPGlobalColorFeatureID> single_buffer_feature_;
   void CheckColorFeature(FrameTriggerMode *mode);
 };
@@ -227,10 +310,10 @@ class FeatureStatePostedStart : public FeatureInterface {
   explicit FeatureStatePostedStart(ColorFeatureCheckingImpl *obj);
   virtual ~FeatureStatePostedStart() {}
 
-  DisplayError Init();
-  DisplayError Deinit();
-  DisplayError SetParams(FeatureOps param_type, void *payload);
-  DisplayError GetParams(FeatureOps param_type, void *payload);
+  DisplayError Init() override;
+  DisplayError Deinit() override;
+  DisplayError SetParams(FeatureOps param_type, void *payload) override;
+  DisplayError GetParams(FeatureOps param_type, void *payload) override;
 
  private:
   ColorFeatureCheckingImpl *obj_;
@@ -241,10 +324,10 @@ class FeatureStateDefaultTrigger : public FeatureInterface {
   explicit FeatureStateDefaultTrigger(ColorFeatureCheckingImpl *obj);
   virtual ~FeatureStateDefaultTrigger() {}
 
-  DisplayError Init();
-  DisplayError Deinit();
-  DisplayError SetParams(FeatureOps param_type, void *payload);
-  DisplayError GetParams(FeatureOps param_type, void *payload);
+  DisplayError Init() override;
+  DisplayError Deinit() override;
+  DisplayError SetParams(FeatureOps param_type, void *payload) override;
+  DisplayError GetParams(FeatureOps param_type, void *payload) override;
 
  private:
   ColorFeatureCheckingImpl *obj_;
@@ -255,10 +338,10 @@ class FeatureStateSerializedTrigger : public FeatureInterface {
   explicit FeatureStateSerializedTrigger(ColorFeatureCheckingImpl *obj);
   virtual ~FeatureStateSerializedTrigger() {}
 
-  DisplayError Init();
-  DisplayError Deinit();
-  DisplayError SetParams(FeatureOps param_type, void *payload);
-  DisplayError GetParams(FeatureOps param_type, void *payload);
+  DisplayError Init() override;
+  DisplayError Deinit() override;
+  DisplayError SetParams(FeatureOps param_type, void *payload) override;
+  DisplayError GetParams(FeatureOps param_type, void *payload) override;
 
  private:
   ColorFeatureCheckingImpl *obj_;
