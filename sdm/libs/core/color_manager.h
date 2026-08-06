@@ -35,6 +35,7 @@
 #include <utils/locker.h>
 #include <private/color_interface.h>
 #include <private/snapdragon_color_intf.h>
+#include <private/color_params.h>
 #include <utils/sys.h>
 #include <utils/debug.h>
 #include <array>
@@ -43,8 +44,8 @@
 #include <string>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 #include <cstring>
-#include <algorithm>
 
 #include "hw_interface.h"
 
@@ -107,7 +108,7 @@ class STCIntfClient {
   DisplayError ProcessOps(const ScOps op, const ScPayload &input, ScPayload *output);
 
  private:
-  static constexpr const char* kStcIntfLib_ = "libsdm-color.so";  // FIXED: Use actual library
+  static constexpr const char* kStcIntfLib_ = "libsdm-color.so";
   
   DisplayError HandleFallbackOperations(const ScOps op, const ScPayload &input, ScPayload *output);
   DisplayError HandleFallbackRenderIntent(const ScPayload &input, ScPayload *output);
@@ -181,20 +182,20 @@ class ColorManagerProxy {
   struct PerformanceStats {
     std::atomic<uint32_t> total_calls{0};
     std::atomic<uint32_t> failed_calls{0};
+    std::atomic<uint64_t> total_processing_time_us{0};
+    std::atomic<uint32_t> hdr_frames_processed{0};
+    std::atomic<uint32_t> gamut_switches{0};
     
-    void RecordCall(bool success) {
+    void RecordCall(uint64_t duration_us, bool success) {
       total_calls++;
+      total_processing_time_us += duration_us;
       if (!success) failed_calls++;
     }
     
-    void LogStats() const {
-      uint32_t calls = total_calls.load();
-      if (calls == 0) return;
-      DLOGI("ColorMgr Stats: calls=%u, failed=%u", calls, failed_calls.load());
-    }
+    void LogStats() const;
   };
 
-  // Runtime configuration with safe defaults
+  // Runtime configuration
   struct RuntimeConfig {
     bool enable_hdr_tone_mapping = true;
     bool enable_gamut_mapping = true;
@@ -202,8 +203,26 @@ class ColorManagerProxy {
     bool use_stc_acceleration = true;
     bool enable_amoled_optimizations = true;
     uint32_t max_payload_size = 3;
+    uint32_t cache_ttl_ms = 100;
     
     static RuntimeConfig LoadFromProperties();
+  };
+
+  // RAII timer for performance measurement
+  class ScopedTimer {
+   public:
+    ScopedTimer(PerformanceStats& stats) : stats_(stats), 
+                  start_(std::chrono::steady_clock::now()), success_(true) {}
+    ~ScopedTimer() {
+      auto end = std::chrono::steady_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
+      stats_.RecordCall(duration, success_);
+    }
+    void SetSuccess(bool success) { success_ = success; }
+   private:
+    PerformanceStats& stats_;
+    std::chrono::steady_clock::time_point start_;
+    bool success_;
   };
 
   bool NeedHwassetsUpdate();
@@ -222,21 +241,29 @@ class ColorManagerProxy {
   DisplayError ApplyAMOLEDOptimizations(GammaPostBlendConfig* igc_config, 
                                         GammaPostBlendConfig* gc_config,
                                         GamutConfig* gamut_config);
-  uint32_t GetDisplayBrightnessNits() const;
-  DisplayError UpdateBrightnessFromDriver();
+  uint32_t GetCurrentDisplayBrightness() const;
   bool IsAMOLEDPanel() const;
   
-  // Cache management (simplified, no raw pointer caching)
+  // Cache management
   struct ColorCache {
     int32_t mode_id = -1;
+    PrimariesTransfer blend_space = {};
+    uint32_t intent = 0;
     ColorMetaData metadata = {};
     bool metadata_valid = false;
+    std::chrono::steady_clock::time_point last_update;
+    bool is_valid = false;
   };
   
+  bool IsCacheValid() const;
   void UpdateCache(const ColorMetaData* metadata);
+  void InvalidateCache();
+  bool ApplyModePending() const { return apply_mode_; }
   
   // Helper functions
-  static void LogColorOperation(const char* operation, DisplayError error);
+  static void LogColorOperation(const char* operation, DisplayError error, 
+                               const char* details = nullptr);
+  static bool IsDebugEnabled(uint32_t category);
   
   ConvertTable convert_;
   RuntimeConfig config_;
@@ -258,28 +285,7 @@ class ColorManagerProxy {
   STCIntfClient *stc_intf_client_ = nullptr;
   bool support_stc_tonemap_ = false;
   bool amoled_panel_ = false;
-  
-  // Real brightness values from driver
-  std::atomic<uint32_t> brightness_nits_{500};
-  uint32_t panel_peak_brightness_ = 0;
-};
-
-// Add MarkAsClean to PPFeaturesConfig
-class PPFeaturesConfig {
- public:
-  void Reset();
-  DisplayError RetrieveNextFeature(PPFeatureInfo **feature);
-  void MarkAsDirty() { dirty_ = true; }
-  void MarkAsClean() { dirty_ = false; }
-  bool IsDirty() const { return dirty_; }
-  PPFeatureInfo* GetFeature(PPGlobalColorFeatureID id);
-  Locker& GetLocker() { return locker_; }
-  
- private:
-  PPFeatureInfo *feature_[kMaxNumPPFeatures];
-  bool dirty_;
-  uint32_t next_idx_;
-  Locker locker_;
+  uint32_t panel_peak_brightness_ = 1800;
 };
 
 class ColorFeatureCheckingImpl : public FeatureInterface {
@@ -303,6 +309,7 @@ class ColorFeatureCheckingImpl : public FeatureInterface {
   FeatureInterface *curr_state_ = nullptr;
   std::vector<PPGlobalColorFeatureID> single_buffer_feature_;
   void CheckColorFeature(FrameTriggerMode *mode);
+  bool ValidateStateTransition(FrameTriggerMode from_mode, FrameTriggerMode to_mode);
 };
 
 class FeatureStatePostedStart : public FeatureInterface {
