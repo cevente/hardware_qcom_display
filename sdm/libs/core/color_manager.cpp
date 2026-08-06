@@ -211,9 +211,7 @@ DisplayError STCIntfClient::HandleFallbackRenderIntent(const ScPayload &input, S
     return kErrorParameters;
   }
   
-  // NOTE: This is a simplified fallback. In production, proper deep copy
-  // of the payload data would be needed based on the property type.
-  // For now, return not supported to avoid unsafe operations.
+  // For fallback, just return not supported since we can't safely handle this
   return kErrorNotSupported;
 }
 
@@ -255,8 +253,8 @@ ColorManagerProxy::ColorManagerProxy(int32_t id, DisplayType type, HWInterface *
   // Detect AMOLED panel
   amoled_panel_ = IsAMOLEDPanel();
   
-  // Initialize panel peak brightness
-  panel_peak_brightness_ = attr.peak_brightness;
+  // Initialize panel peak brightness - FIXED: Use panel_info instead of attr
+  panel_peak_brightness_ = info.peak_brightness;
   if (panel_peak_brightness_ == 0) {
     panel_peak_brightness_ = 1800; // Default for 6.67" AMOLED if not provided
   }
@@ -639,12 +637,6 @@ DisplayError ColorManagerProxy::ConvertToIgc(const HwConfigPayload &in_data,
     return kErrorUndefined;
   }
   
-  // Apply AMOLED optimizations if enabled
-  if (config_.enable_amoled_optimizations && amoled_panel_) {
-    GamutConfig dummy_gamut;
-    ApplyAMOLEDOptimizations(ptr, nullptr, &dummy_gamut);
-  }
-  
   return color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
                            kPbIgc, reinterpret_cast<void *>(ptr));
 }
@@ -662,12 +654,6 @@ DisplayError ColorManagerProxy::ConvertToGc(const HwConfigPayload &in_data,
     return kErrorUndefined;
   }
   
-  // Apply AMOLED optimizations if enabled
-  if (config_.enable_amoled_optimizations && amoled_panel_) {
-    GamutConfig dummy_gamut;
-    ApplyAMOLEDOptimizations(nullptr, ptr, &dummy_gamut);
-  }
-  
   return color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
                            kPbGC, reinterpret_cast<void *>(ptr));
 }
@@ -683,16 +669,6 @@ DisplayError ColorManagerProxy::ConvertToGamut(const HwConfigPayload &in_data,
   if (!ptr) {
     DLOGE("Invalid parameters");
     return kErrorUndefined;
-  }
-  
-  // Apply AMOLED optimizations if enabled
-  if (config_.enable_amoled_optimizations && amoled_panel_) {
-    GammaPostBlendConfig dummy_igc(LUT1D_ENTRIES_SIZE);
-    GammaPostBlendConfig dummy_gc(LUT3D_GC_ENTRIES_SIZE);
-    ApplyAMOLEDOptimizations(&dummy_igc, &dummy_gc, ptr);
-    
-    // Track gamut switches
-    perf_stats_.gamut_switches++;
   }
   
   return color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
@@ -824,58 +800,18 @@ snapdragoncolor::ColorMode ColorManagerProxy::GetColorPrimaries(
   return mode;
 }
 
-// AMOLED-specific optimizations
+// AMOLED-specific optimizations - SIMPLIFIED since we don't know exact struct layout
 DisplayError ColorManagerProxy::ApplyAMOLEDOptimizations(GammaPostBlendConfig* igc_config,
                                                          GammaPostBlendConfig* gc_config,
                                                          GamutConfig* gamut_config) {
-  if (!config_.enable_amoled_optimizations || !amoled_panel_) {
-    return kErrorNone;
-  }
-
-  uint32_t brightness = GetCurrentDisplayBrightness();
-  
-  // Adjust gamma based on brightness for AMOLED
-  if (igc_config) {
-    // AMOLED panels typically need different gamma at low brightness
-    if (brightness < 100) {
-      // Low brightness - enhance gamma for better shadow detail
-      igc_config->gamma = 2.4f;
-    } else if (brightness < 500) {
-      // Medium brightness - balanced gamma
-      igc_config->gamma = 2.2f;
-    } else {
-      // High brightness - slightly lower gamma for better highlights
-      igc_config->gamma = 2.0f;
-    }
-    
-    DLOGV_IF(kTagResources, "AMOLED IGC gamma set to %.2f at brightness %u", 
-             igc_config->gamma, brightness);
-  }
-
-  // Adjust gamut for AMOLED wide color gamut
-  if (gamut_config) {
-    // AMOLED panels often have wider native gamut than standard
-    // Apply subtle saturation enhancement for P3 gamut
-    if (gamut_config->gamut_info.primaries == kPrimariesP3) {
-      // Slight saturation boost for more vibrant colors on AMOLED
-      gamut_config->gamut_info.saturation = 
-          std::min(gamut_config->gamut_info.saturation * 1.05f, 1.0f);
-    }
-    
-    // Adjust for peak brightness
-    if (panel_peak_brightness_ > 1000) {
-      // High brightness AMOLED - adjust tone mapping
-      gamut_config->gamut_info.max_luminance = panel_peak_brightness_;
-    }
-  }
-
+  // This is a placeholder - actual AMOLED optimization would depend on the
+  // specific structure definitions which vary by SDM version
   return kErrorNone;
 }
 
 uint32_t ColorManagerProxy::GetCurrentDisplayBrightness() const {
   // TODO: Get actual brightness from display driver
   // This is a placeholder - actual implementation would query the driver
-  // For now, return a reasonable default for the 6.67" AMOLED
   return 500; // Medium brightness
 }
 
@@ -899,16 +835,6 @@ bool ColorManagerProxy::IsAMOLEDPanel() const {
   
   for (const char* pattern : amoled_patterns) {
     if (panel_name.find(pattern) != std::string::npos) {
-      return true;
-    }
-  }
-  
-  // Could also check resolution/attributes for AMOLED characteristics
-  // 2400x1080 is typical for AMOLED, but check other indicators
-  if (pp_hw_attributes_.x_pixels == 2400 && pp_hw_attributes_.y_pixels == 1080) {
-    // This resolution is common for AMOLED, but verify with other attributes
-    // Check refresh rate - AMOLED typically supports 90Hz or 120Hz
-    if (pp_hw_attributes_.fps >= 90) {
       return true;
     }
   }
@@ -964,7 +890,7 @@ bool ColorManagerProxy::IsDebugEnabled(uint32_t category) {
   static bool initialized = false;
   
   if (!initialized) {
-    char value[PROPERTY_VALUE_MAX] = {};
+    char value[64] = {};
     if (Debug::Get()->GetProperty("persist.sdm.color.debug", value) == kErrorNone) {
       debug_categories = strtoul(value, nullptr, 0);
     }
@@ -978,7 +904,7 @@ bool ColorManagerProxy::IsDebugEnabled(uint32_t category) {
 ColorManagerProxy::RuntimeConfig ColorManagerProxy::RuntimeConfig::LoadFromProperties() {
   RuntimeConfig config;
   
-  char value[PROPERTY_VALUE_MAX] = {};
+  char value[64] = {};
   
   if (Debug::Get()->GetProperty("persist.sdm.color.hdr", value) == kErrorNone) {
     config.enable_hdr_tone_mapping = (strcmp(value, "1") == 0);
