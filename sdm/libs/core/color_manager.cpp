@@ -1,4 +1,4 @@
-/* Copyright (c) 2015 - 2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015 - 2019, The Linux Foundataion. All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are
@@ -542,12 +542,6 @@ DisplayError ColorManagerProxy::ConvertToIgc(const HwConfigPayload &in_data,
     DLOGE("Invalid parameters");
     return kErrorUndefined;
   }
-  
-  // Apply AMOLED optimizations for better color accuracy
-  if (IsAMOLEDPanel()) {
-    ApplyAMOLEDOptimizations(ptr, nullptr, nullptr);
-  }
-  
   ret = color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
                            kPbIgc, reinterpret_cast<void *>(ptr));
   if (ret != kErrorNone) {
@@ -565,16 +559,6 @@ DisplayError ColorManagerProxy::ConvertToGc(const HwConfigPayload &in_data,
   }
   DisplayError ret = kErrorNone;
   GammaPostBlendConfig *ptr = reinterpret_cast<GammaPostBlendConfig*>(in_data.hw_payload.get());
-  if (!ptr) {
-    DLOGE("Invalid parameters");
-    return kErrorUndefined;
-  }
-  
-  // Apply AMOLED optimizations for better color accuracy
-  if (IsAMOLEDPanel()) {
-    ApplyAMOLEDOptimizations(nullptr, ptr, nullptr);
-  }
-  
   ret = color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
                            kPbGC, reinterpret_cast<void *>(ptr));
   if (ret != kErrorNone) {
@@ -594,16 +578,6 @@ DisplayError ColorManagerProxy::ConvertToGamut(const HwConfigPayload &in_data,
 
   DisplayError ret = kErrorNone;
   GamutConfig *ptr = reinterpret_cast<GamutConfig*>(in_data.hw_payload.get());
-  if (!ptr) {
-    DLOGE("Invalid parameters");
-    return kErrorUndefined;
-  }
-  
-  // Apply AMOLED optimizations for better color accuracy
-  if (IsAMOLEDPanel()) {
-    ApplyAMOLEDOptimizations(nullptr, nullptr, ptr);
-  }
-  
   ret = color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
                            kPbGamut, reinterpret_cast<void *>(&ptr->gamut_info));
   if (ret != kErrorNone) {
@@ -732,44 +706,6 @@ snapdragoncolor::ColorMode ColorManagerProxy::GetColorPrimaries(
   mode.gamma = blend_space.transfer;
 
   return mode;
-}
-
-// AMOLED optimization helper implementations
-bool ColorManagerProxy::IsAMOLEDPanel() const {
-  // Check panel name for AMOLED indicators
-  std::string panel_name = pp_hw_attributes_.panel_name;
-  
-  // Convert to lowercase for case-insensitive comparison
-  std::transform(panel_name.begin(), panel_name.end(), panel_name.begin(), ::tolower);
-  
-  // Common AMOLED panel name patterns
-  const char* amoled_patterns[] = {
-    "amoled", "oled", "poled", "super_amoled", "dynamic_amoled",
-    "s6e3", "s6e3fa", "s6e3fb", "s6e3fc", // Samsung AMOLED
-    "s6d7", // Samsung AMOLED
-    "rm67199", // Visionox AMOLED
-    "ft8716", // FocalTech AMOLED
-    "ili9881", // Ilitek AMOLED
-  };
-  
-  for (const char* pattern : amoled_patterns) {
-    if (panel_name.find(pattern) != std::string::npos) {
-      return true;
-    }
-  }
-  
-  return false;
-}
-
-void ColorManagerProxy::ApplyAMOLEDOptimizations(GammaPostBlendConfig* igc_config,
-                                                 GammaPostBlendConfig* gc_config,
-                                                 GamutConfig* gamut_config) {
-  // AMOLED panels benefit from slightly different gamma curves and gamut mapping
-  // This is a safe no-op placeholder - actual implementation would depend on 
-  // the specific structure definitions which vary by SDM version
-  
-  // For now, this function just exists as a hook for future AMOLED-specific tuning
-  DLOGV_IF(kTagResources, "AMOLED optimizations applied (placeholder)");
 }
 
 ColorFeatureCheckingImpl::ColorFeatureCheckingImpl(HWInterface *hw_intf,
