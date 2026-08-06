@@ -47,17 +47,18 @@ std::unique_ptr<histogram::Ringbuffer> histogram::Ringbuffer::create(
 
 void histogram::Ringbuffer::update_cumulative(nsecs_t now, uint64_t &count,
                                               std::array<uint64_t, HIST_V_SIZE> &bins) const {
-  if (ringbuffer_size_ == 0)
+  if (ringbuffer_size_.load(std::memory_order_acquire) == 0)
     return;
 
   count++;
+  size_t current_head = head_.load(std::memory_order_acquire);
   const auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::nanoseconds(now - buffer_[head_].start_timestamp));
+      std::chrono::nanoseconds(now - buffer_[current_head].start_timestamp));
 
   for (auto i = 0u; i < bins.size(); i++) {
-    auto const increment = buffer_[head_].histogram.data[i] * delta.count();
+    auto const increment = buffer_[current_head].histogram.data[i] * delta.count();
     if (CC_UNLIKELY((bins[i] + increment < bins[i]) ||
-                    (increment < buffer_[head_].histogram.data[i]))) {
+                    (increment < buffer_[current_head].histogram.data[i]))) {
       bins[i] = std::numeric_limits<uint64_t>::max();
     } else {
       bins[i] += increment;
@@ -70,25 +71,26 @@ void histogram::Ringbuffer::insert(drm_msm_hist const &frame) {
   auto now = timekeeper->current_time();
 
   // Update cumulative stats before overwriting
-  if (ringbuffer_size_ > 0) {
+  size_t current_size = ringbuffer_size_.load(std::memory_order_acquire);
+  if (current_size > 0) {
     update_cumulative(now, cumulative_frame_count_, cumulative_bins_);
   }
 
-  // Circular buffer implementation
-  if (ringbuffer_size_ == rb_max_size_) {
+  // Circular buffer implementation with proper memory ordering
+  size_t current_tail = tail_.load(std::memory_order_acquire);
+  
+  if (current_size == rb_max_size_) {
     // Buffer is full, overwrite oldest
-    size_t old_head = head_.load();
-    head_.store((old_head + 1) % rb_max_size_);
+    size_t old_head = head_.load(std::memory_order_acquire);
+    head_.store((old_head + 1) % rb_max_size_, std::memory_order_release);
+    // Size remains the same
   } else {
-    // Buffer not full yet
-    size_t current_size = ringbuffer_size_.load();
-    ringbuffer_size_.store(current_size + 1);
+    ringbuffer_size_.store(current_size + 1, std::memory_order_release);
   }
 
   // Store new entry
-  size_t current_tail = tail_.load();
   buffer_[current_tail] = {frame, now, 0};
-  tail_.store((current_tail + 1) % rb_max_size_);
+  tail_.store((current_tail + 1) % rb_max_size_, std::memory_order_release);
 }
 
 bool histogram::Ringbuffer::resize(size_t ringbuffer_size) {
@@ -102,18 +104,21 @@ bool histogram::Ringbuffer::resize(size_t ringbuffer_size) {
     return false;
 
   // Copy existing entries
-  size_t copy_count = std::min(ringbuffer_size_.load(), ringbuffer_size);
+  size_t current_size = ringbuffer_size_.load(std::memory_order_acquire);
+  size_t copy_count = std::min(current_size, ringbuffer_size);
+  size_t current_head = head_.load(std::memory_order_acquire);
+  
   for (size_t i = 0; i < copy_count; i++) {
-    size_t src_idx = (head_.load() + i) % rb_max_size_;
+    size_t src_idx = (current_head + i) % rb_max_size_;
     new_buffer[i] = buffer_[src_idx];
   }
 
   // Update buffer
   buffer_ = std::move(new_buffer);
   rb_max_size_ = ringbuffer_size;
-  head_.store(0);
-  tail_.store(copy_count % ringbuffer_size);
-  ringbuffer_size_.store(copy_count);
+  head_.store(0, std::memory_order_release);
+  tail_.store(copy_count % ringbuffer_size, std::memory_order_release);
+  ringbuffer_size_.store(copy_count, std::memory_order_release);
   
   return true;
 }
@@ -121,7 +126,7 @@ bool histogram::Ringbuffer::resize(size_t ringbuffer_size) {
 histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_cumulative() const {
   std::unique_lock<decltype(mutex)> lk(mutex);
   histogram::Ringbuffer::Sample sample{cumulative_frame_count_, cumulative_bins_};
-  if (ringbuffer_size_ > 0) {
+  if (ringbuffer_size_.load(std::memory_order_acquire) > 0) {
     update_cumulative(timekeeper->current_time(), std::get<0>(sample), std::get<1>(sample));
   }
   return sample;
@@ -129,12 +134,12 @@ histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_cumulative() const 
 
 histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_ringbuffer_all() const {
   std::unique_lock<decltype(mutex)> lk(mutex);
-  return collect_max(ringbuffer_size_.load(), lk);
+  return collect_max(ringbuffer_size_.load(std::memory_order_acquire), lk);
 }
 
 histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_after(nsecs_t timestamp) const {
   std::unique_lock<decltype(mutex)> lk(mutex);
-  return collect_max_after(timestamp, ringbuffer_size_.load(), lk);
+  return collect_max_after(timestamp, ringbuffer_size_.load(std::memory_order_acquire), lk);
 }
 
 histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_max(uint32_t max_frames) const {
@@ -150,7 +155,7 @@ histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_max_after(nsecs_t t
 
 histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_max(
     uint32_t max_frames, std::unique_lock<std::mutex> const &) const {
-  size_t current_size = ringbuffer_size_.load();
+  size_t current_size = ringbuffer_size_.load(std::memory_order_acquire);
   auto collect_first = std::min(static_cast<size_t>(max_frames), current_size);
   if (collect_first == 0)
     return {0, {}};
@@ -159,14 +164,14 @@ histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_max(
   bins.fill(0);
   
   // Start from the newest entry (head)
-  size_t start_idx = head_.load();
+  size_t start_idx = head_.load(std::memory_order_acquire);
   size_t count = 0;
   size_t idx = start_idx;
   
-  while (count < collect_first && idx != tail_.load()) {
+  while (count < collect_first) {
     const auto& entry = buffer_[idx];
     nsecs_t end_timestamp = entry.end_timestamp;
-    if (idx == head_.load()) {
+    if (idx == start_idx) {
       end_timestamp = timekeeper->current_time();
     }
     
@@ -179,6 +184,7 @@ histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_max(
     
     count++;
     idx = (idx + 1) % rb_max_size_;
+    if (idx == tail_.load(std::memory_order_acquire)) break;
   }
   
   return {collect_first, bins};
@@ -186,16 +192,15 @@ histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_max(
 
 histogram::Ringbuffer::Sample histogram::Ringbuffer::collect_max_after(
     nsecs_t timestamp, uint32_t max_frames, std::unique_lock<std::mutex> const &lk) const {
-  size_t current_size = ringbuffer_size_.load();
+  size_t current_size = ringbuffer_size_.load(std::memory_order_acquire);
   if (current_size == 0)
     return {0, {}};
   
   // Find first entry with timestamp >= timestamp
-  size_t idx = head_.load();
-  size_t count = 0;
+  size_t idx = head_.load(std::memory_order_acquire);
   size_t entries_before_timestamp = 0;
   
-  while (idx != tail_.load()) {
+  while (idx != tail_.load(std::memory_order_acquire)) {
     if (buffer_[idx].start_timestamp >= timestamp)
       break;
     entries_before_timestamp++;
