@@ -58,7 +58,7 @@ EGLImageBuffer::EGLImageBuffer(android::sp<android::GraphicBuffer> graphicBuffer
   if (width == 1080 && height == 2400) {
     // Use tiled rendering hints for Bengal
     glHint(GL_GENERATE_MIPMAP_HINT, GL_FASTEST);
-    glHint(GL_TEXTURE_COMPRESSION_HINT, GL_FASTEST);
+    
   }
 }
 
