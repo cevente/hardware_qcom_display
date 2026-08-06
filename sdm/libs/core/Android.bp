@@ -1,21 +1,40 @@
 cc_library_shared {
     name: "libsdmcore",
     defaults: ["qtidisplay_defaults"],
+    
     sanitize: {
         integer_overflow: true,
+        cfi: true,
     },
+    
     vendor: true,
+    
     header_libs: [
         "display_headers",
         "qti_kernel_headers",
         "qti_display_kernel_headers",
     ],
+    
     cflags: [
         "-fno-operator-names",
         "-Wno-format",
         "-Wno-unused-parameter",
         "-DLOG_TAG=\"SDM\"",
+        "-O2",
+        "-fomit-frame-pointer",
+        "-funwind-tables",
+        "-fno-strict-aliasing",
     ],
+    
+    ldflags: [
+        "-Wl,--gc-sections",
+        "-Wl,--strip-all",
+        "-Wl,--as-needed",
+        "-Wl,-z,relro",
+        "-Wl,-z,now",
+        "-Wl,--no-undefined",
+    ],
+    
     shared_libs: [
         "libdl",
         "libdisplaydebug",
@@ -23,8 +42,9 @@ cc_library_shared {
         "libdrm",
         "libdrmutils",
         "libsdedrm",
+        "libsdm-color",
     ],
-
+    
     srcs: [
         "core_interface.cpp",
         "core_impl.cpp",
@@ -48,5 +68,9 @@ cc_library_shared {
         "drm/hw_virtual_drm.cpp",
         "drm/hw_color_manager_drm.cpp",
     ],
-
+    
+    strip: {
+        keep_symbols: false,
+        keep_debug_symbols: false,
+    },
 }
