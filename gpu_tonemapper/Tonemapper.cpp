@@ -39,6 +39,11 @@ Tonemapper::Tonemapper()
 
   tonemapScaleOffset[0] = 1.0f;
   tonemapScaleOffset[1] = 0.0f;
+  
+  // Default to 1080x2400 for Bengal
+  displayWidth = 1080;
+  displayHeight = 2400;
+  useOptimizedPath = true;
 }
 
 //-----------------------------------------------------------------------------
@@ -113,6 +118,20 @@ Tonemapper *Tonemapper::build(int type, void *colorMap, int colorMapSize, void *
       engine_loadProgram(1, &fullscreen_vertex_shader, fragmentShaderCount, fragmentShaders);
 
   return tonemapper;
+}
+
+//-----------------------------------------------------------------------------
+void Tonemapper::setDisplayResolution(int width, int height)
+//-----------------------------------------------------------------------------
+{
+  displayWidth = width;
+  displayHeight = height;
+  
+  // Enable optimized path for 1080x2400
+  useOptimizedPath = (width == 1080 && height == 2400);
+  
+  ALOGI("Tonemapper display resolution set to: %dx%d, optimized: %d", 
+        displayWidth, displayHeight, useOptimizedPath);
 }
 
 //-----------------------------------------------------------------------------
