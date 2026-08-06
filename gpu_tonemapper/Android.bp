@@ -1,11 +1,17 @@
 cc_library_shared {
     name: "libgpu_tonemapper",
+    defaults: ["qtidisplay_defaults"],
+    
     sanitize: {
         integer_overflow: true,
     },
     vendor: true,
 
-    header_libs: ["display_headers"],
+    header_libs: [
+        "display_headers",
+        "display_debug_headers",
+    ],
+    
     shared_libs: [
         "libEGL",
         "libGLESv2",
@@ -30,9 +36,7 @@ cc_library_shared {
         "-fomit-frame-pointer",
         "-fno-math-errno",
         "-fno-trapping-math",
-        "-fno-signaling-nans",
         "-fno-rounding-math",
-        "-fno-protect-parens",
         "-flto=thin",
         "-fuse-ld=lld",
     ],
@@ -52,7 +56,7 @@ cc_library_shared {
         "-Wl,--hash-style=both",
     ],
 
-    // Architecture-specific optimizations for 64-bit ARM
+    // Architecture-specific optimizations for 64-bit ARM (Bengal / Snapdragon 685)
     arch: {
         arm64: {
             cflags: [
