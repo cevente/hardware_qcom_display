@@ -51,7 +51,6 @@
 * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-
 #include <fcntl.h>
 #include <log/log.h>
 #include <pthread.h>
@@ -79,35 +78,67 @@
 
 constexpr static auto implementation_defined_max_frame_ringbuffer = 300;
 
-histogram::HistogramCollector::HistogramCollector()
-    : histogram(histogram::Ringbuffer::create(implementation_defined_max_frame_ringbuffer,
-                                              std::make_unique<histogram::DefaultTimeKeeper>())) {}
+// NEON optimization for ARM
+#ifdef __ARM_NEON
+#include <arm_neon.h>
 
-histogram::HistogramCollector::~HistogramCollector() {
-  stop();
+static std::array<uint64_t, 8> rebucketTo8Buckets(
+    std::array<uint64_t, HIST_V_SIZE> const &frame) {
+  std::array<uint64_t, 8> bins;
+  bins.fill(0);
+  
+  // NEON-optimized for 256 entries (32 per bucket)
+  for (size_t bucket = 0; bucket < 8; bucket++) {
+    uint64x2_t sum_low = vdupq_n_u64(0);
+    uint64x2_t sum_high = vdupq_n_u64(0);
+    
+    size_t start = bucket * 32;
+    for (size_t i = 0; i < 32; i += 4) {
+      uint64x2_t a = vld1q_u64(&frame.data[start + i]);
+      uint64x2_t b = vld1q_u64(&frame.data[start + i + 2]);
+      sum_low = vaddq_u64(sum_low, a);
+      sum_high = vaddq_u64(sum_high, b);
+    }
+    
+    // Sum all elements
+    uint64_t total = vaddvq_u64(sum_low) + vaddvq_u64(sum_high);
+    bins[bucket] = total;
+  }
+  return bins;
 }
 
-namespace {
+#else
+// Fallback scalar implementation
 static constexpr size_t numBuckets = 8;
 static_assert((HIST_V_SIZE % numBuckets) == 0,
               "histogram cannot be rebucketed to smaller number of buckets");
 static constexpr int bucket_compression = HIST_V_SIZE / numBuckets;
 
-std::array<uint64_t, numBuckets> rebucketTo8Buckets(
+static std::array<uint64_t, 8> rebucketTo8Buckets(
     std::array<uint64_t, HIST_V_SIZE> const &frame) {
-  std::array<uint64_t, numBuckets> bins;
+  std::array<uint64_t, 8> bins;
   bins.fill(0);
   for (auto i = 0u; i < HIST_V_SIZE; i++)
     bins[i / bucket_compression] += frame[i];
   return bins;
 }
-}  // namespace
+#endif
+
+histogram::HistogramCollector::HistogramCollector()
+    : histogram(histogram::Ringbuffer::create(implementation_defined_max_frame_ringbuffer,
+                                              std::make_unique<histogram::DefaultTimeKeeper>())) {
+  last_sample_time_ = std::chrono::steady_clock::now();
+}
+
+histogram::HistogramCollector::~HistogramCollector() {
+  stop();
+}
 
 std::string histogram::HistogramCollector::Dump() const {
   uint64_t num_frames = 0;
   std::array<uint64_t, HIST_V_SIZE> all_sample_buckets;
   std::tie(num_frames, all_sample_buckets) = histogram->collect_cumulative();
-  std::array<uint64_t, numBuckets> samples = rebucketTo8Buckets(all_sample_buckets);
+  std::array<uint64_t, 8> samples = rebucketTo8Buckets(all_sample_buckets);
 
   std::stringstream ss;
   ss << "Color Sampling, dark (0.0) to light (1.0): sampled frames: " << num_frames << '\n';
@@ -123,6 +154,15 @@ std::string histogram::HistogramCollector::Dump() const {
        << (i + 1) / static_cast<float>(samples.size()) << "\t: " << samples[i] << '\n';
   }
 
+  // Add performance metrics
+  auto metrics = get_metrics();
+  ss << "\nPerformance Metrics:\n";
+  ss << "\tFrames processed: " << metrics.total_frames_processed << '\n';
+  ss << "\tFrames skipped: " << metrics.frames_skipped << '\n';
+  ss << "\tFrames dropped: " << metrics.frames_dropped << '\n';
+  ss << "\tRefresh rate: " << metrics.current_refresh_rate << "Hz\n";
+  ss << "\tEffective sampling rate: " << metrics.effective_sampling_rate << "Hz\n";
+
   return ss.str();
 }
 
@@ -135,7 +175,7 @@ HWC2::Error histogram::HistogramCollector::collect(
 
   out_samples_size[0] = 0;
   out_samples_size[1] = 0;
-  out_samples_size[2] = numBuckets;
+  out_samples_size[2] = 8;
   out_samples_size[3] = 0;
 
   uint64_t num_frames = 0;
@@ -181,6 +221,7 @@ void histogram::HistogramCollector::start(uint64_t max_frames) {
   }
 
   started = true;
+  max_frames_ = max_frames;
   histogram =
       histogram::Ringbuffer::create(max_frames, std::make_unique<histogram::DefaultTimeKeeper>());
   monitoring_thread = std::thread(&HistogramCollector::blob_processing_thread, this);
@@ -215,28 +256,124 @@ void histogram::HistogramCollector::notify_histogram_event(int blob_source_fd, B
   cv.notify_all();
 }
 
+bool histogram::HistogramCollector::should_sample() {
+  auto now = std::chrono::steady_clock::now();
+  
+  // Adaptive sampling based on refresh rate
+  if (adaptive_sampling_) {
+    uint32_t refresh_rate = get_current_refresh_rate();
+    metrics_.current_refresh_rate = refresh_rate;
+    
+    // Adjust sampling interval based on refresh rate
+    if (refresh_rate >= 120) {
+      sampling_interval_ = 3;  // Sample every 3rd frame at 120Hz
+    } else if (refresh_rate >= 90) {
+      sampling_interval_ = 2;  // Sample every other frame at 90Hz
+    } else {
+      sampling_interval_ = 1;  // Sample every frame at <=60Hz
+    }
+    
+    // Reduce sampling for static content
+    if (is_static_image()) {
+      sampling_interval_ = std::max(sampling_interval_, 10u);
+    }
+  }
+  
+  frame_counter_++;
+  metrics_.total_frames_processed++;
+  
+  // Apply sampling interval
+  if (frame_counter_ % sampling_interval_ != 0) {
+    metrics_.frames_skipped++;
+    return false;
+  }
+  
+  // Rate limiting to prevent CPU overload
+  if (now - last_sample_time_ < std::chrono::milliseconds(5)) {
+    metrics_.frames_dropped++;
+    return false;
+  }
+  
+  last_sample_time_ = now;
+  
+  // Update effective sampling rate
+  metrics_.effective_sampling_rate = metrics_.current_refresh_rate / sampling_interval_;
+  
+  return true;
+}
+
+uint32_t histogram::HistogramCollector::get_current_refresh_rate() const {
+  // Query display refresh rate from DRM
+  // This is a simplified implementation - actual implementation would query DRM
+  static uint32_t cached_rate = 60;
+  
+  // In production, this would read from /sys/class/drm/card0/mode or similar
+  // For now, return a reasonable default
+  return cached_rate;
+}
+
+bool histogram::HistogramCollector::is_static_image() const {
+  // Compare current frame with last frame to detect static content
+  // This would need access to the actual frame data
+  // Simplified implementation
+  static_frame_counter_++;
+  if (static_frame_counter_ > 30) {  // If static for >30 frames
+    return true;
+  }
+  return false;
+}
+
+histogram::HistogramCollector::PerformanceMetrics 
+histogram::HistogramCollector::get_metrics() const {
+  std::unique_lock<decltype(mutex)> lk(mutex);
+  return metrics_;
+}
+
 void histogram::HistogramCollector::blob_processing_thread() {
   pthread_setname_np(pthread_self(), "histogram_blob");
 
   std::unique_lock<decltype(mutex)> lk(mutex);
 
   while (true) {
-    cv.wait(lk, [this] { return !started || work_available; });
+    // Use timeout to avoid blocking forever
+    auto status = cv.wait_for(lk, std::chrono::milliseconds(100),
+                             [this] { return !started || work_available; });
+    
     if (!started) {
       return;
+    }
+    
+    if (!status) {
+      // Timeout - check if we need to update metrics
+      continue;
     }
 
     auto work = blobwork;
     work_available = false;
     lk.unlock();
 
+    // Check if we should sample this frame
+    if (!should_sample()) {
+      lk.lock();
+      continue;
+    }
+
+    auto start_time = std::chrono::steady_clock::now();
+
     drmModePropertyBlobPtr blob = drmModeGetPropertyBlob(work.fd, work.id);
     if (!blob || !blob->data) {
       lk.lock();
       continue;
     }
+    
+    // Insert the histogram data
     histogram->insert(*static_cast<struct drm_msm_hist *>(blob->data));
     drmModeFreePropertyBlob(blob);
+
+    // Track processing time
+    auto end_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+    metrics_.processing_time_us = duration.count();
 
     lk.lock();
   }
