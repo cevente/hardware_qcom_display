@@ -13,7 +13,6 @@
 // limitations under the License.
 
 cc_library_shared {
-
     name: "libhistogram",
     vendor: true,
 
@@ -37,12 +36,54 @@ cc_library_shared {
         "-Werror",
         "-fno-operator-names",
         "-Wthread-safety",
+        "-O3",
+        "-flto",          // Link-time optimization
+        "-funroll-loops",  // Unroll loops where beneficial
+        "-fomit-frame-pointer",
+        "-ffast-math",     // Fast math optimizations (safe for histogram)
+        "-D__ARM_NEON",    // Enable NEON by default
     ],
+
+    // Architecture-specific flags - let build system handle tuning
+    arch: {
+        arm: {
+            cflags: [
+                "-mfpu=neon",
+                "-D__ARM_NEON",
+                // Remove hardcoded -mtune, let device defaults apply
+            ],
+        },
+        arm64: {
+            cflags: [
+                "-D__ARM_NEON",
+                // ARM64 NEON is always available
+            ],
+        },
+    },
+
+    // For big.LITTLE optimization (Cortex-A73/A53 mix)
+    target: {
+        android_arm: {
+            cflags: [
+                "-march=armv8-a",  // Base ARMv8-A, compatible with A73/A53
+                // Let scheduler handle big.LITTLE through kernel
+            ],
+        },
+        android_arm64: {
+            cflags: [
+                "-march=armv8-a",
+            ],
+        },
+    },
+
     srcs: [
         "histogram_collector.cpp",
         "ringbuffer.cpp",
     ],
 
+    strip: {
+        keep_symbols: false,
+    },
 }
 
 cc_binary {
@@ -70,10 +111,20 @@ cc_binary {
         "-Werror",
         "-fno-operator-names",
         "-Wthread-safety",
+        "-O3",
+        "-flto",
+        "-funroll-loops",
+        "-fomit-frame-pointer",
+        "-D__ARM_NEON",
     ],
 
-    vendor: true,
+    arch: {
+        arm: {
+            cflags: ["-mfpu=neon"],
+        },
+    },
 
+    vendor: true,
 }
 
 cc_binary {
@@ -105,8 +156,8 @@ cc_binary {
         "-Werror",
         "-fno-operator-names",
         "-Wthread-safety",
+        "-O2",
     ],
 
     vendor: true,
-
 }
