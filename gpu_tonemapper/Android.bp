@@ -24,6 +24,23 @@ cc_library_shared {
         "-DLOG_TAG=\"GPU_TONEMAPPER\"",
         "-DTARGET_ION_ABI_VERSION=2",
         "-Wno-unreachable-code-loop-increment",
+        // ARM Cortex-A53 optimizations for Bengal/SD685
+        "-mcpu=cortex-a53",
+        "-mfpu=neon-fp-armv8",
+        "-mfloat-abi=hard",
+        "-O3",
+        "-ffast-math",
+        "-funroll-loops",
+        "-fomit-frame-pointer",
+        "-fno-math-errno",
+        "-fno-trapping-math",
+        "-fno-signaling-nans",
+        "-fno-rounding-math",
+        "-fno-protect-parens",
+        // Additional optimization flags
+        "-flto=thin",
+        "-fuse-ld=lld",
+        "-DANDROID_ARM_FP=16",
     ],
 
     srcs: [
@@ -34,4 +51,19 @@ cc_library_shared {
         "Tonemapper.cpp",
     ],
 
+    // Linker optimizations
+    ldflags: [
+        "-Wl,--gc-sections",
+        "-Wl,--no-undefined",
+        "-Wl,--icf=all",
+        "-Wl,--hash-style=both",
+        "-Wl,--no-merge-exidx-entries",
+    ],
+
+    // Enable ARM NEON optimizations
+    arm: {
+        cflags: [
+            "-mfpu=neon",
+        ],
+    },
 }
