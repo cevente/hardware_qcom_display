@@ -16,12 +16,16 @@
 
 #ifndef HISTOGRAM_HISTOGRAM_COLLECTOR_H_
 #define HISTOGRAM_HISTOGRAM_COLLECTOR_H_
+
 #include <android-base/thread_annotations.h>
 #include <condition_variable>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <chrono>
+#include <array>
+#include <memory>
+
 #define HWC2_INCLUDE_STRINGIFICATION
 #define HWC2_USE_CPP11
 #include <hardware/hwcomposer2.h>
@@ -54,7 +58,7 @@ class HistogramCollector {
   HWC2::Error getAttributes(int32_t *format, int32_t *dataspace,
                             uint8_t *supported_components) const;
 
-  // New configuration methods
+  // Configuration methods
   void set_sampling_interval(uint32_t interval) { sampling_interval_ = interval; }
   void set_max_frames(uint64_t max_frames) { max_frames_ = max_frames; }
   void set_adaptive_sampling(bool enable) { adaptive_sampling_ = enable; }
