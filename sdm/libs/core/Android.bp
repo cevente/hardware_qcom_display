@@ -68,9 +68,4 @@ cc_library_shared {
         "drm/hw_virtual_drm.cpp",
         "drm/hw_color_manager_drm.cpp",
     ],
-    
-    strip: {
-        keep_symbols: false,
-        keep_debug_symbols: false,
-    },
 }
