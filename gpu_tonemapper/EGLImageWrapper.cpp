@@ -86,7 +86,9 @@ EGLImageWrapper::~EGLImageWrapper()
 void EGLImageWrapper::Init()
 //-----------------------------------------------------------------------------
 {
-  eglImageBufferCache = new android::LruCache<int, EGLImageBuffer*>(32);
+  // Reduced cache size for 1080x2400 on Bengal (from 32 to 8)
+  // This reduces memory footprint and improves cache hit rates
+  eglImageBufferCache = new android::LruCache<int, EGLImageBuffer*>(8);
   callback = new DeleteEGLImageCallback(&buffStrbuffIntMap);
   eglImageBufferCache->setOnEntryRemovedListener(callback);
 }
