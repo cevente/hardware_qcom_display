@@ -98,9 +98,9 @@ static std::array<uint64_t, 8> rebucketTo8Buckets(
     uint64x2_t sum_high = vdupq_n_u64(0);
     
     size_t start = bucket * 32;
-    // Use frame.data[offset] for proper array access
+    // Use array subscripting for proper array access
     for (size_t i = 0; i < 32; i += 4) {
-      // Load 4 uint64_t values at a time (2 per uint64x2_t)
+      // Load 4 uint64_t values at a time using array subscript
       uint64x2_t a = vld1q_u64(&frame.data[start + i]);
       uint64x2_t b = vld1q_u64(&frame.data[start + i + 2]);
       sum_low = vaddq_u64(sum_low, a);
@@ -265,106 +265,63 @@ void histogram::HistogramCollector::notify_histogram_event(int blob_source_fd, B
   cv.notify_all();
 }
 
+bool histogram::HistogramCollector::should_sample() {
+  auto now = std::chrono::steady_clock::now();
+  
+  // Rate limiting - prevent CPU overload
+  if (now - last_sample_time_ < std::chrono::milliseconds(5)) {
+    metrics_.frames_dropped++;
+    return false;
+  }
+  
+  if (adaptive_sampling_) {
+    uint32_t refresh_rate = get_current_refresh_rate();
+    metrics_.current_refresh_rate = refresh_rate;
+    
+    // Adjust sampling interval based on refresh rate
+    if (refresh_rate >= 120) {
+      sampling_interval_ = 3;  // Sample every 3rd frame at 120Hz
+    } else if (refresh_rate >= 90) {
+      sampling_interval_ = 2;  // Sample every other frame at 90Hz
+    } else {
+      sampling_interval_ = 1;  // Sample every frame at <=60Hz
+    }
+    
+    // Reduce sampling for static content
+    if (is_static_image()) {
+      sampling_interval_ = std::max(sampling_interval_, 10u);
+    }
+  }
+  
+  frame_counter_++;
+  metrics_.total_frames_processed++;
+  
+  // Apply sampling interval
+  if (frame_counter_ % sampling_interval_ != 0) {
+    metrics_.frames_skipped++;
+    return false;
+  }
+  
+  last_sample_time_ = now;
+  metrics_.effective_sampling_rate = metrics_.current_refresh_rate / sampling_interval_;
+  
+  return true;
+}
+
 uint32_t histogram::HistogramCollector::get_current_refresh_rate() const {
-    // Method 1: Query via DRM
-    static uint32_t cached_rate = 60;
-    static nsecs_t last_query_time = 0;
-    
-    // Cache for 1 second to avoid excessive syscalls
-    nsecs_t now = systemTime(SYSTEM_TIME_MONOTONIC);
-    if (now - last_query_time < 1000000000LL) {  // 1 second
-        return cached_rate;
-    }
-    last_query_time = now;
-    
-    // Try to read from sysfs
-    std::ifstream refresh_file("/sys/class/drm/card0/mode");
-    if (refresh_file.is_open()) {
-        std::string mode;
-        std::getline(refresh_file, mode);
-        // Parse mode string: "1920x1080@60" format
-        size_t at_pos = mode.find('@');
-        if (at_pos != std::string::npos) {
-            try {
-                cached_rate = std::stoi(mode.substr(at_pos + 1));
-                return cached_rate;
-            } catch (...) {
-                // Parse failed, use fallback
-            }
-        }
-    }
-    
-    // Fallback: Query through DRM
-    int fd = open("/dev/dri/card0", O_RDWR);
-    if (fd >= 0) {
-        drmModeResPtr resources = drmModeGetResources(fd);
-        if (resources && resources->count_crtcs > 0) {
-            drmModeCrtcPtr crtc = drmModeGetCrtc(fd, resources->crtcs[0]);
-            if (crtc) {
-                drmModeModeInfoPtr mode = &crtc->mode;
-                if (mode->clock > 0) {
-                    // Calculate refresh rate from clock and vertical total
-                    uint32_t refresh = (mode->clock * 1000) / (mode->htotal * mode->vtotal);
-                    cached_rate = refresh;
-                }
-                drmModeFreeCrtc(crtc);
-            }
-        }
-        if (resources) {
-            drmModeFreeResources(resources);
-        }
-        close(fd);
-    }
-    
-    return cached_rate;
+  // Simplified for now - returns default
+  // In production, this would query DRM or sysfs
+  static uint32_t cached_rate = 60;
+  return cached_rate;
 }
 
 bool histogram::HistogramCollector::is_static_image() const {
-    // This uses the static_frame_counter_ updated in blob_processing_thread
-    return static_frame_counter_ > 30;  // 30 frames of static content
-}
-
-bool histogram::HistogramCollector::should_sample() {
-    auto now = std::chrono::steady_clock::now();
-    
-    // Rate limiting - prevent CPU overload
-    if (now - last_sample_time_ < std::chrono::milliseconds(5)) {
-        metrics_.frames_dropped++;
-        return false;
-    }
-    
-    if (adaptive_sampling_) {
-        uint32_t refresh_rate = get_current_refresh_rate();
-        metrics_.current_refresh_rate = refresh_rate;
-        
-        // Adjust sampling interval based on refresh rate
-        if (refresh_rate >= 120) {
-            sampling_interval_ = 3;  // Sample every 3rd frame at 120Hz
-        } else if (refresh_rate >= 90) {
-            sampling_interval_ = 2;  // Sample every other frame at 90Hz
-        } else {
-            sampling_interval_ = 1;  // Sample every frame at <=60Hz
-        }
-        
-        // Reduce sampling for static content
-        if (is_static_image()) {
-            sampling_interval_ = std::max(sampling_interval_, 10u);
-        }
-    }
-    
-    frame_counter_++;
-    metrics_.total_frames_processed++;
-    
-    // Apply sampling interval
-    if (frame_counter_ % sampling_interval_ != 0) {
-        metrics_.frames_skipped++;
-        return false;
-    }
-    
-    last_sample_time_ = now;
-    metrics_.effective_sampling_rate = metrics_.current_refresh_rate / sampling_interval_;
-    
+  // Increment counter - will be updated with real frame comparison
+  static_frame_counter_++;
+  if (static_frame_counter_ > 30) {
     return true;
+  }
+  return false;
 }
 
 histogram::HistogramCollector::PerformanceMetrics 
@@ -374,70 +331,70 @@ histogram::HistogramCollector::get_metrics() const {
 }
 
 void histogram::HistogramCollector::blob_processing_thread() {
-    pthread_setname_np(pthread_self(), "histogram_blob");
-    std::unique_lock<decltype(mutex)> lk(mutex);
+  pthread_setname_np(pthread_self(), "histogram_blob");
+  std::unique_lock<decltype(mutex)> lk(mutex);
 
-    while (true) {
-        auto status = cv.wait_for(lk, std::chrono::milliseconds(100),
-                                 [this] { return !started || work_available; });
-        
-        if (!started) return;
-        if (!status) continue;
+  while (true) {
+    auto status = cv.wait_for(lk, std::chrono::milliseconds(100),
+                             [this] { return !started || work_available; });
+    
+    if (!started) return;
+    if (!status) continue;
 
-        auto work = blobwork;
-        work_available = false;
-        lk.unlock();
+    auto work = blobwork;
+    work_available = false;
+    lk.unlock();
 
-        // Get the blob data first
-        drmModePropertyBlobPtr blob = drmModeGetPropertyBlob(work.fd, work.id);
-        if (!blob || !blob->data) {
-            lk.lock();
-            continue;
-        }
-        
-        auto* hist_data = static_cast<struct drm_msm_hist *>(blob->data);
-        
-        // Check if image is static (similar to previous frame)
-        if (has_last_frame_) {
-            bool is_similar = true;
-            for (size_t i = 0; i < HIST_V_SIZE; i++) {
-                // Allow for small variations (noise tolerance)
-                if (std::abs(static_cast<int64_t>(hist_data->data[i]) - 
-                           static_cast<int64_t>(last_frame_data_[i])) > 100) {
-                    is_similar = false;
-                    break;
-                }
-            }
-            
-            if (is_similar) {
-                static_frame_counter_++;
-            } else {
-                static_frame_counter_ = 0;
-            }
-        }
-        
-        // Update last frame data
-        memcpy(last_frame_data_.data(), hist_data->data, sizeof(uint64_t) * HIST_V_SIZE);
-        has_last_frame_ = true;
-        
-        // Check if we should sample (now with actual static detection)
-        if (!should_sample()) {
-            drmModeFreePropertyBlob(blob);
-            lk.lock();
-            continue;
-        }
-
-        auto start_time = std::chrono::steady_clock::now();
-        
-        // Insert the histogram data
-        histogram->insert(*hist_data);
-        drmModeFreePropertyBlob(blob);
-
-        // Track processing time
-        auto end_time = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
-        metrics_.processing_time_us = duration.count();
-
+    // Get the blob data first
+    drmModePropertyBlobPtr blob = drmModeGetPropertyBlob(work.fd, work.id);
+    if (!blob || !blob->data) {
         lk.lock();
+        continue;
     }
+    
+    auto* hist_data = static_cast<struct drm_msm_hist *>(blob->data);
+    
+    // Check if image is static (similar to previous frame)
+    if (has_last_frame_) {
+        bool is_similar = true;
+        for (size_t i = 0; i < HIST_V_SIZE; i++) {
+            // Allow for small variations (noise tolerance)
+            if (std::abs(static_cast<int64_t>(hist_data->data[i]) - 
+                       static_cast<int64_t>(last_frame_data_[i])) > 100) {
+                is_similar = false;
+                break;
+            }
+        }
+        
+        if (is_similar) {
+            static_frame_counter_++;
+        } else {
+            static_frame_counter_ = 0;
+        }
+    }
+    
+    // Update last frame data
+    memcpy(last_frame_data_.data(), hist_data->data, sizeof(uint64_t) * HIST_V_SIZE);
+    has_last_frame_ = true;
+    
+    // Check if we should sample
+    if (!should_sample()) {
+        drmModeFreePropertyBlob(blob);
+        lk.lock();
+        continue;
+    }
+
+    auto start_time = std::chrono::steady_clock::now();
+    
+    // Insert the histogram data
+    histogram->insert(*hist_data);
+    drmModeFreePropertyBlob(blob);
+
+    // Track processing time
+    auto end_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+    metrics_.processing_time_us = duration.count();
+
+    lk.lock();
+  }
 }
