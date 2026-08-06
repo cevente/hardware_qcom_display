@@ -59,10 +59,10 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <array>
-#include <deque>
 #include <memory>
 #include <mutex>
 #include <tuple>
+#include <atomic>
 
 namespace histogram {
 
@@ -94,6 +94,10 @@ class Ringbuffer {
   Sample collect_max_after(nsecs_t timestamp, uint32_t max_frames) const;
   ~Ringbuffer() = default;
 
+  // New methods for monitoring
+  size_t size() const { return ringbuffer_size_; }
+  size_t capacity() const { return rb_max_size_; }
+
  private:
   Ringbuffer(size_t ringbuffer_size, std::unique_ptr<TimeKeeper> tk);
   Ringbuffer(Ringbuffer const &) = delete;
@@ -106,17 +110,25 @@ class Ringbuffer {
                          std::array<uint64_t, HIST_V_SIZE> &bins) const;
 
   std::mutex mutable mutex;
+  
+  // Cache-aligned struct for better performance
   struct HistogramEntry {
-    drm_msm_hist histogram;
+    drm_msm_hist histogram;  // 256 * 8 = 2048 bytes
     nsecs_t start_timestamp;
     nsecs_t end_timestamp;
-  };
-  std::deque<HistogramEntry> ringbuffer;
-  size_t rb_max_size;
+  } __attribute__((aligned(64)));
+
+  // Use circular buffer instead of deque for better cache performance
+  std::unique_ptr<HistogramEntry[]> buffer_;
+  std::atomic<size_t> head_{0};
+  std::atomic<size_t> tail_{0};
+  std::atomic<size_t> ringbuffer_size_{0};
+  size_t rb_max_size_;
   std::unique_ptr<TimeKeeper> const timekeeper;
 
-  uint64_t cumulative_frame_count;
-  std::array<uint64_t, HIST_V_SIZE> cumulative_bins;
+  // Cumulative statistics
+  uint64_t cumulative_frame_count_;
+  std::array<uint64_t, HIST_V_SIZE> cumulative_bins_;
 };
 
 }  // namespace histogram
