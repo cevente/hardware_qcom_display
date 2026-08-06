@@ -49,7 +49,7 @@ EGLImageBuffer::EGLImageBuffer(android::sp<android::GraphicBuffer> graphicBuffer
   this->width = graphicBuffer->getWidth();
   this->height = graphicBuffer->getHeight();
 
-  // Optimize for 1080x2400 on Bengal - lazy initialization
+  // Lazy initialization - these will be created on first use
   textureID = 0;
   renderbufferID = 0;
   framebufferID = 0;
@@ -132,16 +132,12 @@ void EGLImageBuffer::bindAsTexture(int target)
   if (textureID == 0) {
     GL(glGenTextures(1, &textureID));
     GL(glBindTexture(target, textureID));
+    
+    // Set texture parameters once - no redundant calls
     GL(glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
     GL(glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
     GL(glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
     GL(glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
-
-    // For 1080x2400, use optimized texture parameters
-    if (width == 1080 && height == 2400) {
-      GL(glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
-      GL(glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
-    }
 
     GL(glEGLImageTargetTexture2DOES(target, eglImageID));
   }
