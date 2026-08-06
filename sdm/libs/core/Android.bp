@@ -3,6 +3,8 @@ cc_library_shared {
     defaults: ["qtidisplay_defaults"],
     sanitize: {
         integer_overflow: true,
+        // CFI may cause issues with some vendor HALs, keep it disabled
+        // cfi: true,
     },
     vendor: true,
     header_libs: [
@@ -15,6 +17,9 @@ cc_library_shared {
         "-Wno-format",
         "-Wno-unused-parameter",
         "-DLOG_TAG=\"SDM\"",
+        // Safe optimizations
+        "-O2",
+        "-fomit-frame-pointer",
     ],
     shared_libs: [
         "libdl",
@@ -23,6 +28,8 @@ cc_library_shared {
         "libdrm",
         "libdrmutils",
         "libsdedrm",
+        // libsdm-color is NOT a build-time dependency
+        // It's loaded dynamically via dlopen() at runtime
     ],
 
     srcs: [
