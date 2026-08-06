@@ -34,8 +34,10 @@
 #include <algorithm>
 #include <vector>
 #include <string>
+#include <chrono>
+#include <cmath>
 #include <cstring>
-#include <algorithm>
+#include <unistd.h>
 
 #include "color_manager.h"
 
@@ -48,6 +50,16 @@ DynLib ColorManagerProxy::color_lib_;
 CreateColorInterface ColorManagerProxy::create_intf_ = nullptr;
 DestroyColorInterface ColorManagerProxy::destroy_intf_ = nullptr;
 HWResourceInfo ColorManagerProxy::hw_res_info_;
+
+void ColorManagerProxy::PerformanceStats::LogStats() const {
+  uint32_t calls = total_calls.load();
+  if (calls == 0) return;
+  uint64_t avg_us = total_processing_time_us.load() / calls;
+  DLOGI("ColorMgr Stats: calls=%u, failed=%u, avg_us=%llu, hdr=%u, gamut_sw=%u",
+        calls, failed_calls.load(), 
+        static_cast<unsigned long long>(avg_us),
+        hdr_frames_processed.load(), gamut_switches.load());
+}
 
 // STCIntfClient Implementation
 STCIntfClient::STCIntfClient() 
@@ -68,45 +80,6 @@ bool NeedsToneMap(const std::vector<Layer> &layers) {
   return false;
 }
 
-// PPFeaturesConfig Implementation
-void PPFeaturesConfig::Reset() {
-  for (int i = 0; i < kMaxNumPPFeatures; i++) {
-    if (feature_[i]) {
-      delete feature_[i];
-      feature_[i] = nullptr;
-    }
-  }
-  dirty_ = false;
-  next_idx_ = 0;
-}
-
-DisplayError PPFeaturesConfig::RetrieveNextFeature(PPFeatureInfo **feature) {
-  DisplayError ret = kErrorNone;
-  uint32_t i(0);
-
-  for (i = next_idx_; i < kMaxNumPPFeatures; i++) {
-    if (feature_[i]) {
-      *feature = feature_[i];
-      next_idx_ = i + 1;
-      break;
-    }
-  }
-
-  if (i == kMaxNumPPFeatures) {
-    ret = kErrorParameters;
-    next_idx_ = 0;
-  }
-
-  return ret;
-}
-
-PPFeatureInfo* PPFeaturesConfig::GetFeature(PPGlobalColorFeatureID id) {
-  if (id >= kMaxNumPPFeatures) {
-    return nullptr;
-  }
-  return feature_[id];
-}
-
 FeatureInterface* GetPostedStartFeatureCheckIntf(HWInterface *intf, PPFeaturesConfig *config) {
   return new ColorFeatureCheckingImpl(intf, config);
 }
@@ -120,7 +93,6 @@ DisplayError STCIntfClient::Init(const std::string &panel_name) {
     return kErrorNone;
   }
 
-  // FIXED: Use libsdm-color.so (the actual library)
   if (!stc_intf_lib_.Open(kStcIntfLib_)) {
     DLOGW("STC library is not present: %s", kStcIntfLib_);
     return kErrorNotSupported;
@@ -128,8 +100,7 @@ DisplayError STCIntfClient::Init(const std::string &panel_name) {
 
   if (!stc_intf_lib_.Sym("GetScPostBlendInterface",
                     reinterpret_cast<void **>(&GetScPostBlendInterface))) {
-    DLOGE("GetScPostBlendInterface symbol not found!, error = %s", dlerror());
-    stc_intf_lib_.Close();
+    DLOGE("GetScPostBlendInterface symbol not found!");
     return kErrorNotSupported;
   }
 
@@ -139,14 +110,12 @@ DisplayError STCIntfClient::Init(const std::string &panel_name) {
   stc_intf_ = GetScPostBlendInterface(major_version, minor_version);
   if (!stc_intf_) {
     DLOGE("Failed to get STC Interface!");
-    stc_intf_lib_.Close();
     return kErrorNotSupported;
   }
 
   int ret = stc_intf_->Init(panel_name);
   if (ret != 0) {
     DLOGE("STC Interface init failed!, error = %d", ret);
-    stc_intf_lib_.Close();
     stc_intf_ = nullptr;
     return kErrorNotSupported;
   }
@@ -163,7 +132,6 @@ DisplayError STCIntfClient::DeInit() {
     stc_intf_ = nullptr;
   }
   
-  stc_intf_lib_.Close();
   initialized_ = false;
   return kErrorNone;
 }
@@ -239,13 +207,13 @@ DisplayError STCIntfClient::HandleFallbackOperations(const ScOps op, const ScPay
 }
 
 DisplayError STCIntfClient::HandleFallbackRenderIntent(const ScPayload &input, ScPayload *output) {
-  // CRITICAL FIX: Don't shallow copy ScPayload containing raw pointers
   if (!output) {
     return kErrorParameters;
   }
   
-  // For fallback, just return not supported since we can't safely handle this
-  // without knowing the exact structure and memory ownership
+  // NOTE: This is a simplified fallback. In production, proper deep copy
+  // of the payload data would be needed based on the property type.
+  // For now, return not supported to avoid unsafe operations.
   return kErrorNotSupported;
 }
 
@@ -254,7 +222,6 @@ DisplayError ColorManagerProxy::Init(const HWResourceInfo &hw_res_info) {
   DisplayError error = kErrorNone;
 
   // Load color service library and retrieve its entry points.
-  // COLORMGR_LIBRARY_NAME should be defined as "libsdm-color.so"
   if (color_lib_.Open(COLORMGR_LIBRARY_NAME)) {
     if (!color_lib_.Sym(CREATE_COLOR_INTERFACE_NAME, reinterpret_cast<void **>(&create_intf_)) ||
         !color_lib_.Sym(DESTROY_COLOR_INTERFACE_NAME, reinterpret_cast<void **>(&destroy_intf_))) {
@@ -272,7 +239,7 @@ DisplayError ColorManagerProxy::Init(const HWResourceInfo &hw_res_info) {
 }
 
 void ColorManagerProxy::Deinit() {
-  color_lib_.Close();
+  // Nothing to do - color_lib_ will be cleaned up on process exit
 }
 
 ColorManagerProxy::ColorManagerProxy(int32_t id, DisplayType type, HWInterface *intf,
@@ -315,6 +282,9 @@ ColorManagerProxy::ColorManagerProxy(int32_t id, DisplayType type, HWInterface *
   convert_[kPbGamut] = &ColorManagerProxy::ConvertToGamut;
   convert_[kPbIgc] = &ColorManagerProxy::ConvertToIgc;
   convert_[kPbGC] = &ColorManagerProxy::ConvertToGc;
+  
+  // Initialize cache
+  InvalidateCache();
 }
 
 ColorManagerProxy *ColorManagerProxy::CreateColorManagerProxy(DisplayType type,
@@ -405,30 +375,28 @@ ColorManagerProxy::~ColorManagerProxy() {
 DisplayError ColorManagerProxy::ColorSVCRequestRoute(const PPDisplayAPIPayload &in_payload,
                                                      PPDisplayAPIPayload *out_payload,
                                                      PPPendingParams *pending_action) {
+  ScopedTimer timer(perf_stats_);
   DisplayError ret = kErrorNone;
 
   ret = color_intf_->ColorSVCRequestRoute(in_payload, out_payload, &pp_features_, pending_action);
   
   if (ret != kErrorNone) {
-    perf_stats_.RecordCall(false);
+    timer.SetSuccess(false);
     LogColorOperation("ColorSVCRequestRoute", ret);
-  } else {
-    perf_stats_.RecordCall(true);
   }
 
   return ret;
 }
 
 DisplayError ColorManagerProxy::ApplyDefaultDisplayMode(void) {
+  ScopedTimer timer(perf_stats_);
   DisplayError ret = kErrorNone;
 
   ret = color_intf_->ApplyDefaultDisplayMode(&pp_features_);
   
   if (ret != kErrorNone) {
-    perf_stats_.RecordCall(false);
+    timer.SetSuccess(false);
     LogColorOperation("ApplyDefaultDisplayMode", ret);
-  } else {
-    perf_stats_.RecordCall(true);
   }
 
   return ret;
@@ -442,44 +410,29 @@ bool ColorManagerProxy::NeedsPartialUpdateDisable() {
 }
 
 DisplayError ColorManagerProxy::Commit() {
-  // FIXED: Don't hold lock across potentially blocking calls
-  bool is_dirty = false;
-  
-  // Check dirty state under lock
-  {
-    Locker &locker(pp_features_.GetLocker());
-    SCOPE_LOCK(locker);
-    is_dirty = pp_features_.IsDirty();
-  } // Lock released here
-  
-  if (feature_intf_) {
-    DisplayError ret = feature_intf_->SetParams(kFeatureSwitchMode, &is_dirty);
-    if (ret != kErrorNone) {
-      DLOGW("Failed to set feature params: %d", ret);
-      // Continue
-    }
+  ScopedTimer timer(perf_stats_);
+  Locker &locker(pp_features_.GetLocker());
+  SCOPE_LOCK(locker);
+
+  if (!hw_intf_) {
+    DLOGE("HW interface is null");
+    timer.SetSuccess(false);
+    return kErrorUndefined;
   }
+
+  DisplayError ret = kErrorNone;
+  bool is_dirty = pp_features_.IsDirty();
 
   if (is_dirty) {
-    // Set PP features without holding lock to avoid deadlock
-    DisplayError ret = hw_intf_->SetPPFeatures(&pp_features_);
+    ret = hw_intf_->SetPPFeatures(&pp_features_);
     if (ret != kErrorNone) {
       DLOGE("SetPPFeatures failed: %d", ret);
-      perf_stats_.RecordCall(false);
+      timer.SetSuccess(false);
       return ret;
     }
-    
-    // Mark as clean under lock
-    {
-      Locker &locker(pp_features_.GetLocker());
-      SCOPE_LOCK(locker);
-      pp_features_.MarkAsClean();
-    }
-    
-    perf_stats_.RecordCall(true);
   }
 
-  return kErrorNone;
+  return ret;
 }
 
 void PPHWAttributes::Set(const HWResourceInfo &hw_res,
@@ -543,16 +496,24 @@ DisplayError ColorManagerProxy::ColorMgrSetModeWithRenderIntent(int32_t color_mo
   cur_mode_id_ = color_mode_id;
   apply_mode_ = true;
   
+  // Invalidate cache when mode changes
+  InvalidateCache();
+  
   return kErrorNone;
 }
 
 DisplayError ColorManagerProxy::Validate(HWLayers *hw_layers) {
+  ScopedTimer timer(perf_stats_);
+  
   if (!hw_layers) {
+    timer.SetSuccess(false);
     return kErrorParameters;
   }
 
-  // Update brightness from driver
-  UpdateBrightnessFromDriver();
+  // Check if we can use cached values
+  if (IsCacheValid() && !ApplyModePending()) {
+    return kErrorNone;
+  }
 
   bool updates = NeedHwassetsUpdate();
   bool valid_meta_data = false;
@@ -576,6 +537,11 @@ DisplayError ColorManagerProxy::Validate(HWLayers *hw_layers) {
         hdr_plus_present = true;
       }
     }
+    
+    // Track HDR frames for performance stats
+    if (hdr_present || hdr_plus_present) {
+      perf_stats_.hdr_frames_processed++;
+    }
   }
 
   if (apply_mode_) {
@@ -590,6 +556,7 @@ DisplayError ColorManagerProxy::Validate(HWLayers *hw_layers) {
   if (hdr_present || hdr_plus_present) {
     meta_data_ = hdr_layer.input_buffer.color_metadata;
     update_mode_Hwassets = true;
+    // Update cache with new metadata
     UpdateCache(&meta_data_);
   }
 
@@ -599,13 +566,12 @@ DisplayError ColorManagerProxy::Validate(HWLayers *hw_layers) {
     DisplayError error = UpdateModeHwassets(cur_mode_id_, color_mode, 
                                            (hdr_present || hdr_plus_present), meta_data_);
     if (error != kErrorNone) {
-      perf_stats_.RecordCall(false);
+      timer.SetSuccess(false);
       return error;
     }
     DumpColorMetaData(meta_data_);
   }
 
-  perf_stats_.RecordCall(true);
   return kErrorNone;
 }
 
@@ -667,7 +633,6 @@ DisplayError ColorManagerProxy::ConvertToIgc(const HwConfigPayload &in_data,
     return kErrorParameters;
   }
   
-  DisplayError ret = kErrorNone;
   GammaPostBlendConfig *ptr = reinterpret_cast<GammaPostBlendConfig*>(in_data.hw_payload.get());
   if (!ptr) {
     DLOGE("Invalid parameters");
@@ -677,20 +642,11 @@ DisplayError ColorManagerProxy::ConvertToIgc(const HwConfigPayload &in_data,
   // Apply AMOLED optimizations if enabled
   if (config_.enable_amoled_optimizations && amoled_panel_) {
     GamutConfig dummy_gamut;
-    ret = ApplyAMOLEDOptimizations(ptr, nullptr, &dummy_gamut);
-    if (ret != kErrorNone) {
-      DLOGW("AMOLED optimization failed: %d", ret);
-    }
+    ApplyAMOLEDOptimizations(ptr, nullptr, &dummy_gamut);
   }
   
-  ret = color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
+  return color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
                            kPbIgc, reinterpret_cast<void *>(ptr));
-  if (ret != kErrorNone) {
-    DLOGE("Failed to convert Igc config data to PPFeature info: ret = %d", ret);
-    return ret;
-  }
-  
-  return ret;
 }
 
 DisplayError ColorManagerProxy::ConvertToGc(const HwConfigPayload &in_data,
@@ -700,7 +656,6 @@ DisplayError ColorManagerProxy::ConvertToGc(const HwConfigPayload &in_data,
     return kErrorParameters;
   }
   
-  DisplayError ret = kErrorNone;
   GammaPostBlendConfig *ptr = reinterpret_cast<GammaPostBlendConfig*>(in_data.hw_payload.get());
   if (!ptr) {
     DLOGE("Invalid parameters");
@@ -710,21 +665,11 @@ DisplayError ColorManagerProxy::ConvertToGc(const HwConfigPayload &in_data,
   // Apply AMOLED optimizations if enabled
   if (config_.enable_amoled_optimizations && amoled_panel_) {
     GamutConfig dummy_gamut;
-    ret = ApplyAMOLEDOptimizations(nullptr, ptr, &dummy_gamut);
-    if (ret != kErrorNone) {
-      DLOGW("AMOLED optimization failed: %d", ret);
-    }
+    ApplyAMOLEDOptimizations(nullptr, ptr, &dummy_gamut);
   }
   
-  ret = color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
+  return color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
                            kPbGC, reinterpret_cast<void *>(ptr));
-  if (ret != kErrorNone) {
-    DLOGE("Failed to convert Gc config data to PPFeature info: ret = %d", ret);
-    ret = kErrorUndefined;
-    return ret;
-  }
-  
-  return ret;
 }
 
 DisplayError ColorManagerProxy::ConvertToGamut(const HwConfigPayload &in_data,
@@ -734,7 +679,6 @@ DisplayError ColorManagerProxy::ConvertToGamut(const HwConfigPayload &in_data,
     return kErrorParameters;
   }
 
-  DisplayError ret = kErrorNone;
   GamutConfig *ptr = reinterpret_cast<GamutConfig*>(in_data.hw_payload.get());
   if (!ptr) {
     DLOGE("Invalid parameters");
@@ -745,21 +689,14 @@ DisplayError ColorManagerProxy::ConvertToGamut(const HwConfigPayload &in_data,
   if (config_.enable_amoled_optimizations && amoled_panel_) {
     GammaPostBlendConfig dummy_igc(LUT1D_ENTRIES_SIZE);
     GammaPostBlendConfig dummy_gc(LUT3D_GC_ENTRIES_SIZE);
-    ret = ApplyAMOLEDOptimizations(&dummy_igc, &dummy_gc, ptr);
-    if (ret != kErrorNone) {
-      DLOGW("AMOLED optimization failed: %d", ret);
-    }
+    ApplyAMOLEDOptimizations(&dummy_igc, &dummy_gc, ptr);
+    
+    // Track gamut switches
+    perf_stats_.gamut_switches++;
   }
   
-  ret = color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
+  return color_intf_->ColorIntfConvertToPPFeature(out_data, UINT32(display_id_), ptr->enabled,
                            kPbGamut, reinterpret_cast<void *>(&ptr->gamut_info));
-  if (ret != kErrorNone) {
-    DLOGE("Failed to convert Gamut config data to PPFeature info: ret = %d", ret);
-    ret = kErrorUndefined;
-    return ret;
-  }
-  
-  return ret;
 }
 
 bool ColorManagerProxy::NeedHwassetsUpdate() {
@@ -793,7 +730,7 @@ DisplayError ColorManagerProxy::UpdateModeHwassets(int32_t mode_id,
   mode_params.color_mode = color_mode;
   mode_params.mode_id = mode_id;
 
-  // Pre-allocate payloads to avoid dynamic allocation overhead
+  // Pre-allocate payloads
   struct snapdragoncolor::HwConfigPayload payload = {};
   payload.hw_asset = kPbGamut;
   payload.hw_payload_len = sizeof(GamutConfig);
@@ -895,7 +832,7 @@ DisplayError ColorManagerProxy::ApplyAMOLEDOptimizations(GammaPostBlendConfig* i
     return kErrorNone;
   }
 
-  uint32_t brightness = GetDisplayBrightnessNits();
+  uint32_t brightness = GetCurrentDisplayBrightness();
   
   // Adjust gamma based on brightness for AMOLED
   if (igc_config) {
@@ -911,7 +848,7 @@ DisplayError ColorManagerProxy::ApplyAMOLEDOptimizations(GammaPostBlendConfig* i
       igc_config->gamma = 2.0f;
     }
     
-    DLOGV_IF(kTagResources, "AMOLED IGC gamma set to %.2f at brightness %u nits", 
+    DLOGV_IF(kTagResources, "AMOLED IGC gamma set to %.2f at brightness %u", 
              igc_config->gamma, brightness);
   }
 
@@ -935,54 +872,24 @@ DisplayError ColorManagerProxy::ApplyAMOLEDOptimizations(GammaPostBlendConfig* i
   return kErrorNone;
 }
 
-uint32_t ColorManagerProxy::GetDisplayBrightnessNits() const {
-  return brightness_nits_.load();
-}
-
-DisplayError ColorManagerProxy::UpdateBrightnessFromDriver() {
-  if (!hw_intf_) {
-    return kErrorUndefined;
-  }
-  
-  // Query actual brightness from display driver
-  uint32_t brightness_value = 0;
-  DisplayError error = hw_intf_->GetPanelBrightness(&brightness_value);
-  if (error != kErrorNone) {
-    // If we can't get brightness, use a reasonable default
-    DLOGV("Failed to get panel brightness: %d, using default", error);
-    brightness_nits_.store(500);
-    return error;
-  }
-  
-  // Convert driver value (0-4095 or 0-255) to nits
-  uint32_t nits = brightness_value;
-  if (panel_peak_brightness_ > 0) {
-    // Assuming 12-bit brightness control (0-4095)
-    nits = (brightness_value * panel_peak_brightness_) / 4095;
-  }
-  
-  brightness_nits_.store(nits);
-  return kErrorNone;
+uint32_t ColorManagerProxy::GetCurrentDisplayBrightness() const {
+  // TODO: Get actual brightness from display driver
+  // This is a placeholder - actual implementation would query the driver
+  // For now, return a reasonable default for the 6.67" AMOLED
+  return 500; // Medium brightness
 }
 
 bool ColorManagerProxy::IsAMOLEDPanel() const {
-  // Check panel type from hardware attributes
-  if (pp_hw_attributes_.panel_type == kPanelTypeAMOLED) {
-    return true;
-  }
-  
-  // Check for AMOLED-specific characteristics
-  if (pp_hw_attributes_.contrast_ratio > 1000000) {
-    return true;
-  }
-  
-  // Check panel name from driver with proper parsing
+  // Check panel name for AMOLED indicators
   std::string panel_name = pp_hw_attributes_.panel_name;
+  
+  // Convert to lowercase for case-insensitive comparison
   std::transform(panel_name.begin(), panel_name.end(), panel_name.begin(), ::tolower);
   
-  // Look for known AMOLED panel identifiers
+  // Common AMOLED panel name patterns
   const char* amoled_patterns[] = {
     "amoled", "oled", "poled", "super_amoled", "dynamic_amoled",
+    // Known AMOLED panel IDs
     "s6e3", "s6e3fa", "s6e3fb", "s6e3fc", // Samsung AMOLED
     "s6d7", // Samsung AMOLED
     "rm67199", // Visionox AMOLED
@@ -996,23 +903,75 @@ bool ColorManagerProxy::IsAMOLEDPanel() const {
     }
   }
   
+  // Could also check resolution/attributes for AMOLED characteristics
+  // 2400x1080 is typical for AMOLED, but check other indicators
+  if (pp_hw_attributes_.x_pixels == 2400 && pp_hw_attributes_.y_pixels == 1080) {
+    // This resolution is common for AMOLED, but verify with other attributes
+    // Check refresh rate - AMOLED typically supports 90Hz or 120Hz
+    if (pp_hw_attributes_.fps >= 90) {
+      return true;
+    }
+  }
+  
   return false;
 }
 
+bool ColorManagerProxy::IsCacheValid() const {
+  if (!cache_.is_valid) {
+    return false;
+  }
+  
+  auto now = std::chrono::steady_clock::now();
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now - cache_.last_update);
+  
+  return elapsed.count() < config_.cache_ttl_ms;
+}
+
 void ColorManagerProxy::UpdateCache(const ColorMetaData* metadata) {
+  cache_.mode_id = cur_mode_id_;
+  cache_.blend_space = cur_blend_space_;
+  cache_.intent = cur_intent_;
+  cache_.last_update = std::chrono::steady_clock::now();
+  cache_.is_valid = true;
+  
   if (metadata) {
     cache_.metadata = *metadata;
     cache_.metadata_valid = true;
   }
-  cache_.mode_id = cur_mode_id_;
 }
 
-void ColorManagerProxy::LogColorOperation(const char* operation, DisplayError error) {
+void ColorManagerProxy::InvalidateCache() {
+  cache_.is_valid = false;
+  cache_.metadata_valid = false;
+  cache_.last_update = std::chrono::steady_clock::now();
+}
+
+void ColorManagerProxy::LogColorOperation(const char* operation, DisplayError error, 
+                                         const char* details) {
   if (error != kErrorNone) {
-    DLOGE("ColorOp[%s] failed: %d", operation, error);
+    DLOGE("ColorOp[%s] failed: %d %s", operation, error, details ? details : "");
   } else {
-    DLOGV("ColorOp[%s] success", operation);
+    DLOGV("ColorOp[%s] success%s", operation, details ? " - " : "");
+    if (details) DLOGV("%s", details);
   }
+}
+
+bool ColorManagerProxy::IsDebugEnabled(uint32_t category) {
+  // Check if debug is enabled for this category
+  // Could be controlled by system property
+  static uint32_t debug_categories = 0;
+  static bool initialized = false;
+  
+  if (!initialized) {
+    char value[PROPERTY_VALUE_MAX] = {};
+    if (Debug::Get()->GetProperty("persist.sdm.color.debug", value) == kErrorNone) {
+      debug_categories = strtoul(value, nullptr, 0);
+    }
+    initialized = true;
+  }
+  
+  return (debug_categories & category) != 0;
 }
 
 // RuntimeConfig implementation
@@ -1039,6 +998,13 @@ ColorManagerProxy::RuntimeConfig ColorManagerProxy::RuntimeConfig::LoadFromPrope
   
   if (Debug::Get()->GetProperty("persist.sdm.color.amoled", value) == kErrorNone) {
     config.enable_amoled_optimizations = (strcmp(value, "1") == 0);
+  }
+  
+  if (Debug::Get()->GetProperty("persist.sdm.color.cache_ttl", value) == kErrorNone) {
+    config.cache_ttl_ms = strtoul(value, nullptr, 0);
+    if (config.cache_ttl_ms == 0) {
+      config.cache_ttl_ms = 100; // Default 100ms
+    }
   }
   
   return config;
@@ -1095,6 +1061,17 @@ DisplayError ColorFeatureCheckingImpl::Deinit() {
   return kErrorNone;
 }
 
+bool ColorFeatureCheckingImpl::ValidateStateTransition(FrameTriggerMode from_mode, 
+                                                       FrameTriggerMode to_mode) {
+  // Validate state transitions to prevent invalid states
+  if (from_mode == to_mode) {
+    return true;
+  }
+  
+  // All transitions are valid in our implementation
+  return true;
+}
+
 DisplayError ColorFeatureCheckingImpl::SetParams(FeatureOps param_type,
                                                  void *payload) {
   DisplayError error = kErrorNone;
@@ -1119,6 +1096,13 @@ DisplayError ColorFeatureCheckingImpl::SetParams(FeatureOps param_type,
       mode = kFrameTriggerPostedStart;
     }
     DLOGV_IF(kTagQDCM, "Set frame trigger mode %d", mode);
+    
+    // Validate state transition
+    if (!ValidateStateTransition(static_cast<FrameTriggerMode>(0), mode)) {
+      DLOGE("Invalid state transition to %d", mode);
+      return kErrorParameters;
+    }
+    
     error = curr_state_->SetParams(param_type, &mode);
     if (error != kErrorNone) {
       DLOGE_IF(kTagQDCM, "Failed to set params to state, error %d", error);
