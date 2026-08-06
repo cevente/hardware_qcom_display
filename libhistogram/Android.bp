@@ -42,6 +42,7 @@ cc_library_shared {
         "-fomit-frame-pointer",
         "-ffast-math",     // Fast math optimizations (safe for histogram)
         "-D__ARM_NEON",    // Enable NEON by default
+        // Keep -fno-exceptions which is the Android default
     ],
 
     // Architecture-specific flags - let build system handle tuning
@@ -50,13 +51,11 @@ cc_library_shared {
             cflags: [
                 "-mfpu=neon",
                 "-D__ARM_NEON",
-                // Remove hardcoded -mtune, let device defaults apply
             ],
         },
         arm64: {
             cflags: [
                 "-D__ARM_NEON",
-                // ARM64 NEON is always available
             ],
         },
     },
@@ -66,7 +65,6 @@ cc_library_shared {
         android_arm: {
             cflags: [
                 "-march=armv8-a",  // Base ARMv8-A, compatible with A73/A53
-                // Let scheduler handle big.LITTLE through kernel
             ],
         },
         android_arm64: {
