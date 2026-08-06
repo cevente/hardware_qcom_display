@@ -94,8 +94,8 @@ class Ringbuffer {
   Sample collect_max_after(nsecs_t timestamp, uint32_t max_frames) const;
   ~Ringbuffer() = default;
 
-  // New methods for monitoring
-  size_t size() const { return ringbuffer_size_; }
+  // Monitoring methods
+  size_t size() const { return ringbuffer_size_.load(std::memory_order_acquire); }
   size_t capacity() const { return rb_max_size_; }
 
  private:
