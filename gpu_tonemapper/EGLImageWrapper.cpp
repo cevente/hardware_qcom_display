@@ -86,11 +86,12 @@ EGLImageWrapper::~EGLImageWrapper()
 void EGLImageWrapper::Init()
 //-----------------------------------------------------------------------------
 {
-  // Reduced cache size for 1080x2400 on Bengal (from 32 to 8)
-  // This reduces memory footprint and improves cache hit rates
+  // Cache size of 8 is sufficient for typical use cases on Bengal
+  // If you experience jank with rapid layer recycling, consider increasing to 16
   eglImageBufferCache = new android::LruCache<int, EGLImageBuffer*>(8);
   callback = new DeleteEGLImageCallback(&buffStrbuffIntMap);
   eglImageBufferCache->setOnEntryRemovedListener(callback);
+  buffInt = 0; // Initialize the counter
 }
 
 //-----------------------------------------------------------------------------
@@ -111,7 +112,6 @@ void EGLImageWrapper::Deinit()
     delete callback;
     callback = 0;
   }
-
 }
 
 //-----------------------------------------------------------------------------
@@ -167,9 +167,10 @@ EGLImageBuffer *EGLImageWrapper::wrap(const void *pvt_handle)
       eglImage = eglImageBufferCache->get(it->second);
     } else {
         eglImage = L_wrap(src);
-        buffStrbuffIntMap.insert(pair<string, int>(buffStr, buffInt));
-        eglImageBufferCache->put(buffInt, eglImage);
-        buffInt++;
+        // Use this->buffInt to properly reference the member variable
+        buffStrbuffIntMap.insert(pair<string, int>(buffStr, this->buffInt));
+        eglImageBufferCache->put(this->buffInt, eglImage);
+        this->buffInt++; // Increment the member variable
     }
   } else {
     ALOGE("Could not provide an eglImage for fd = %d, EGLImageWrapper = %p", src->fd, this);
