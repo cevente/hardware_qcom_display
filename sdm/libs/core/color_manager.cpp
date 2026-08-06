@@ -84,6 +84,45 @@ FeatureInterface* GetPostedStartFeatureCheckIntf(HWInterface *intf, PPFeaturesCo
   return new ColorFeatureCheckingImpl(intf, config);
 }
 
+// PPFeaturesConfig Implementation - KEEP THIS!
+void PPFeaturesConfig::Reset() {
+  for (int i = 0; i < kMaxNumPPFeatures; i++) {
+    if (feature_[i]) {
+      delete feature_[i];
+      feature_[i] = nullptr;
+    }
+  }
+  dirty_ = false;
+  next_idx_ = 0;
+}
+
+DisplayError PPFeaturesConfig::RetrieveNextFeature(PPFeatureInfo **feature) {
+  DisplayError ret = kErrorNone;
+  uint32_t i(0);
+
+  for (i = next_idx_; i < kMaxNumPPFeatures; i++) {
+    if (feature_[i]) {
+      *feature = feature_[i];
+      next_idx_ = i + 1;
+      break;
+    }
+  }
+
+  if (i == kMaxNumPPFeatures) {
+    ret = kErrorParameters;
+    next_idx_ = 0;
+  }
+
+  return ret;
+}
+
+PPFeatureInfo* PPFeaturesConfig::GetFeature(PPGlobalColorFeatureID id) {
+  if (id >= kMaxNumPPFeatures) {
+    return nullptr;
+  }
+  return feature_[id];
+}
+
 // STCIntfClient Implementation
 DisplayError STCIntfClient::Init(const std::string &panel_name) {
   lock_guard<mutex> lock(lock_);
