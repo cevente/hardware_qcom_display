@@ -102,7 +102,6 @@ DisplayError HWPeripheralDRM::Init() {
   CreatePanelFeaturePropertyMap();
   
   // Check if HDR is actually supported by the kernel driver
-  // This prevents sending properties that don't exist
   bool hdr_supported = connector_info_.panel_hdr_prop.hdr_enabled || 
                        connector_info_.ext_hdr_prop.hdr_supported;
   
@@ -1113,6 +1112,7 @@ int HWPeripheralDRM::GetPanelFeature(PanelFeaturePropertyInfo *feature_info) {
   return ret;
 }
 
+// FIXED: SetPanelFeature - using dot operator for reference
 int HWPeripheralDRM::SetPanelFeature(const PanelFeaturePropertyInfo &feature_info) {
   int ret = 0;
   DRMPanelFeatureInfo drm_feature = {};
@@ -1126,17 +1126,19 @@ int HWPeripheralDRM::SetPanelFeature(const PanelFeaturePropertyInfo &feature_inf
     case kPanelFeatureRCInitCfg:
       drm_feature.obj_type = DRM_MODE_OBJECT_CRTC;
       drm_feature.obj_id = token_.crtc_id;
-     break;
+      break;
     case kPanelFeatureSPRPackType:
       drm_feature.obj_type = DRM_MODE_OBJECT_CONNECTOR;
       drm_feature.obj_id = token_.conn_id;
-     break;
+      break;
     default:
-     DLOGE("Set Panel feature property %d not implemented", feature_info->prop_id);
-     return -EINVAL;
+      // FIXED: Changed feature_info->prop_id to feature_info.prop_id
+      DLOGE("Set Panel feature property %d not implemented", feature_info.prop_id);
+      return -EINVAL;
   }
 
-  DLOGI("Set Panel feature property %d", feature_info->prop_id);
+  // FIXED: Changed feature_info->prop_id to feature_info.prop_id
+  DLOGI("Set Panel feature property %d", feature_info.prop_id);
   drm_mgr_intf_->SetPanelFeature(drm_feature);
 
   return ret;
