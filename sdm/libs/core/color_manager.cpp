@@ -253,12 +253,6 @@ ColorManagerProxy::ColorManagerProxy(int32_t id, DisplayType type, HWInterface *
   // Detect AMOLED panel
   amoled_panel_ = IsAMOLEDPanel();
   
-  // Initialize panel peak brightness - FIXED: Use panel_info instead of attr
-  panel_peak_brightness_ = info.peak_brightness;
-  if (panel_peak_brightness_ == 0) {
-    panel_peak_brightness_ = 1800; // Default for 6.67" AMOLED if not provided
-  }
-  
   // Initialize feature interface if needed
   int32_t enable_posted_start_dyn = 0;
   Debug::Get()->GetProperty("persist.sdm.enable_posted_start_dyn", &enable_posted_start_dyn);
@@ -800,10 +794,10 @@ snapdragoncolor::ColorMode ColorManagerProxy::GetColorPrimaries(
   return mode;
 }
 
-// AMOLED-specific optimizations - SIMPLIFIED since we don't know exact struct layout
-DisplayError ColorManagerProxy::ApplyAMOLEDOptimizations(GammaPostBlendConfig* igc_config,
-                                                         GammaPostBlendConfig* gc_config,
-                                                         GamutConfig* gamut_config) {
+// AMOLED-specific optimizations - simplified stub
+DisplayError ColorManagerProxy::ApplyAMOLEDOptimizations(GammaPostBlendConfig* /*igc_config*/,
+                                                         GammaPostBlendConfig* /*gc_config*/,
+                                                         GamutConfig* /*gamut_config*/) {
   // This is a placeholder - actual AMOLED optimization would depend on the
   // specific structure definitions which vary by SDM version
   return kErrorNone;
