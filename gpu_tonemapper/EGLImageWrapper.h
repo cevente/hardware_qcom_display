@@ -42,7 +42,7 @@ class EGLImageWrapper {
   android::LruCache<int, EGLImageBuffer *>* eglImageBufferCache;
   map<string, int> buffStrbuffIntMap = {};
   DeleteEGLImageCallback* callback = 0;
-  uint64_t buffInt = 0;
+  uint64_t buffInt;  // Counter for generating unique IDs
 
  public:
   EGLImageWrapper();
