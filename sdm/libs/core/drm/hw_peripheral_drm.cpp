@@ -16,12 +16,6 @@ Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
 
 #define __CLASS__ "HWPeripheralDRM"
 
-// Static constant initialization for 1800 nits AMOLED panel
-const float HWPeripheralDRM::kDefaultMinLuminance = 0.02f;
-const float HWPeripheralDRM::kDefaultMaxLuminance = 1800.0f;
-const float HWPeripheralDRM::kMinPeakLuminance = 300.0f;
-const float HWPeripheralDRM::kMaxPeakLuminance = 2000.0f;
-
 using sde_drm::DRMDisplayType;
 using sde_drm::DRMOps;
 using sde_drm::DRMPowerMode;
@@ -33,6 +27,13 @@ using sde_drm::DRMSecureMode;
 using sde_drm::DRMCWbCaptureMode;
 
 namespace sdm {
+
+// Static constant initialization INSIDE the sdm namespace
+const float HWPeripheralDRM::kDefaultMinLuminance = 0.02f;
+const float HWPeripheralDRM::kDefaultMaxLuminance = 1800.0f;
+const float HWPeripheralDRM::kMinPeakLuminance = 300.0f;
+const float HWPeripheralDRM::kMaxPeakLuminance = 2000.0f;
+const float HWPeripheralDRM::kHDRBrightnessBoostFactor = 1.1f;
 
 // HDR EOTF Helper Functions - Static, no Android framework dependencies
 static int32_t GetEOTF(const GammaTransfer &transfer) {
@@ -100,10 +101,6 @@ DisplayError HWPeripheralDRM::Init() {
   PopulateBitClkRates();
   CreatePanelFeaturePropertyMap();
   
-  // Initialize for AMOLED panel
-  hw_panel_info_.panel_type = kAMOLED;
-  hw_panel_info_.always_on_display_supported = true;
-  
   // Check if HDR is actually supported by the kernel driver
   // This prevents sending properties that don't exist
   bool hdr_supported = connector_info_.panel_hdr_prop.hdr_enabled || 
@@ -127,15 +124,22 @@ DisplayError HWPeripheralDRM::Init() {
     DLOGW("HDR not supported by kernel DRM driver - HDR features disabled");
   }
   
-  // Set DCI-P3 primaries for the panel (valid regardless of HDR)
-  hw_panel_info_.primaries.white_point[0] = 0.3127f;  // D65
-  hw_panel_info_.primaries.white_point[1] = 0.3290f;
-  hw_panel_info_.primaries.red[0] = 0.680f;    // DCI-P3 red
-  hw_panel_info_.primaries.red[1] = 0.320f;
-  hw_panel_info_.primaries.green[0] = 0.265f;  // DCI-P3 green
-  hw_panel_info_.primaries.green[1] = 0.690f;
-  hw_panel_info_.primaries.blue[0] = 0.150f;   // DCI-P3 blue
-  hw_panel_info_.primaries.blue[1] = 0.060f;
+  // Set DCI-P3 primaries for the panel using scaled uint32_t values
+  // White point: D65 (0.3127, 0.3290)
+  hw_panel_info_.primaries.white_point[0] = 15635;  // 0.3127 * 50000
+  hw_panel_info_.primaries.white_point[1] = 16450;  // 0.3290 * 50000
+  
+  // Red primary: (0.680, 0.320)
+  hw_panel_info_.primaries.red[0] = 34000;  // 0.680 * 50000
+  hw_panel_info_.primaries.red[1] = 16000;  // 0.320 * 50000
+  
+  // Green primary: (0.265, 0.690)
+  hw_panel_info_.primaries.green[0] = 13250;  // 0.265 * 50000
+  hw_panel_info_.primaries.green[1] = 34500;  // 0.690 * 50000
+  
+  // Blue primary: (0.150, 0.060)
+  hw_panel_info_.primaries.blue[0] = 7500;   // 0.150 * 50000
+  hw_panel_info_.primaries.blue[1] = 3000;   // 0.060 * 50000
 
   DLOGI("AMOLED Panel initialized: %dx%d @ %dHz, %.1f nits peak, HDR=%d",
         display_attributes_[current_mode_index_].x_pixels,
@@ -433,7 +437,6 @@ DisplayError HWPeripheralDRM::GetPanelBrightness(int *level) {
 
 DisplayError HWPeripheralDRM::SetBLScale(uint32_t level) {
   // Apply brightness scaling if supported by kernel
-  // This is safe as it's just a hint to the kernel
   return HWDeviceDRM::SetBLScale(level);
 }
 
@@ -674,7 +677,7 @@ DisplayError HWPeripheralDRM::Commit(HWLayers *hw_layers) {
   return error;
 }
 
-// Dest Scalar Management (unchanged - already efficient)
+// Dest Scalar Management
 void HWPeripheralDRM::ResetDestScalarCache() {
   for (uint32_t j = 0; j < scalar_data_.size(); j++) {
     dest_scalar_cache_[j] = {};
@@ -739,7 +742,7 @@ void HWPeripheralDRM::CacheDestScalarData() {
   }
 }
 
-// Concurrent Writeback (unchanged)
+// Concurrent Writeback
 DisplayError HWPeripheralDRM::SetupConcurrentWritebackModes() {
   if (drm_mgr_intf_->RegisterDisplay(DRMDisplayType::VIRTUAL, &cwb_config_.token)) {
     DLOGE("RegisterDisplay failed for Concurrent Writeback");
@@ -843,7 +846,7 @@ DisplayError HWPeripheralDRM::TeardownConcurrentWriteback(void) {
   return kErrorNone;
 }
 
-// Other DRM operations - Safe and non-blocking
+// Other DRM operations
 DisplayError HWPeripheralDRM::SetDynamicDSIClock(uint64_t bit_clk_rate) {
   if (last_power_mode_ == DRMPowerMode::DOZE_SUSPEND || last_power_mode_ == DRMPowerMode::OFF) {
     return kErrorNotSupported;
