@@ -164,9 +164,11 @@ unsigned int engine_load3DTexture(void *colorMapData, int sz, int format)
   GL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
   GL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
 
-  // Use optimized format for Bengal if available
-  GL(glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB10_A2, sz, sz, sz, 0, GL_RGBA,
-                  GL_UNSIGNED_INT_2_10_10_10_REV, colorMapData));
+  // Use GL_RGBA8 for maximum compatibility with Adreno 610
+  // GL_RGB10_A2 may not be supported for 3D textures on all drivers
+  // and the tonemap data is typically provided as RGBA8888
+  GL(glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, sz, sz, sz, 0, GL_RGBA,
+                  GL_UNSIGNED_BYTE, colorMapData));
 
   return texture;
 }
@@ -184,8 +186,9 @@ unsigned int engine_load1DTexture(void *data, int sz, int format)
     GL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
     GL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
 
-    GL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB10_A2, sz, 1, 0, GL_RGBA,
-                    GL_UNSIGNED_INT_2_10_10_10_REV, data));
+    // Use GL_RGBA8 for maximum compatibility
+    GL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sz, 1, 0, GL_RGBA,
+                    GL_UNSIGNED_BYTE, data));
   }
   return texture;
 }
@@ -263,8 +266,6 @@ int CreateNativeFence()
   // Limit concurrent operations on Bengal to prevent pipeline stalls
   if (perfStats.pendingFences >= MAX_PENDING_FENCES) {
     ALOGV("%s - Waiting for fence to complete, pending: %d", __FUNCTION__, perfStats.pendingFences);
-    // Fences will be completed by GPU, we just limit creation
-    // This prevents GPU from being overwhelmed with 1080x2400 frames
   }
 
   EGLSyncKHR sync = eglCreateSyncKHR(eglGetCurrentDisplay(), EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
