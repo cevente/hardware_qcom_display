@@ -35,6 +35,9 @@ class Tonemapper {
   float lutXformScaleOffset[2];
   float tonemapScaleOffset[2];
   EGLImageWrapper* eglImageWrapper;
+  int displayWidth;
+  int displayHeight;
+  bool useOptimizedPath;
   Tonemapper();
 
  public:
@@ -42,6 +45,7 @@ class Tonemapper {
   static Tonemapper *build(int type, void *colorMap, int colorMapSize, void *lutXform,
                            int lutXformSize, bool isSecure);
   int blit(const void *dst, const void *src, int srcFenceFd);
+  void setDisplayResolution(int width, int height);
 };
 
 #endif  //__TONEMAPPER_TONEMAP_H__
