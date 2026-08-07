@@ -144,6 +144,10 @@ class HWCColorMode {
   HWC2::Error SetColorTransform(const float *matrix, android_color_transform_t hint);
   HWC2::Error RestoreColorTransform();
   ColorMode GetCurrentColorMode() { return current_color_mode_; }
+  
+  // ===== ADDED: Getter for current render intent =====
+  RenderIntent GetCurrentRenderIntent() { return current_render_intent_; }
+  
   HWC2::Error ApplyCurrentColorModeWithRenderIntent(bool hdr_present);
   HWC2::Error CacheColorModeWithRenderIntent(ColorMode mode, RenderIntent intent);
 
