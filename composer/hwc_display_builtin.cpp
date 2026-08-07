@@ -301,12 +301,28 @@ HWC2::Error HWCDisplayBuiltIn::Validate(uint32_t *out_num_types, uint32_t *out_n
   error = display_intf_->SetRefreshRate(refresh_rate, force_refresh_rate_, idle_screen);
 
   // Get the refresh rate set.
-  display_intf_->GetRefreshRate(&refresh_rate);
+  uint32_t new_refresh_rate = 0;
+  display_intf_->GetRefreshRate(&new_refresh_rate);
+
+  // ===== FIX: Refresh rate change detection - force color mode reapplication =====
+  if (current_refresh_rate_ != new_refresh_rate) {
+    DLOGI("Refresh rate changed from %d to %d. Reapplying color mode.", 
+          current_refresh_rate_, new_refresh_rate);
+    // Cache current color mode to force reapplication on next validation
+    color_mode_->CacheColorModeWithRenderIntent(
+        color_mode_->GetCurrentColorMode(), 
+        color_mode_->GetCurrentRenderIntent()
+    );
+    // Force revalidation on next cycle to ensure color mode is reapplied
+    validated_ = false;
+  }
+  // ===== END OF FIX =====
+
   bool vsync_source = (callbacks_->GetVsyncSource() == id_);
 
   if (error == kErrorNone) {
-    if (vsync_source && ((current_refresh_rate_ < refresh_rate) ||
-                         (enhance_idle_time_ && (current_refresh_rate_ != refresh_rate)))) {
+    if (vsync_source && ((current_refresh_rate_ < new_refresh_rate) ||
+                         (enhance_idle_time_ && (current_refresh_rate_ != new_refresh_rate)))) {
       DTRACE_BEGIN("HWC2::Vsync::Enable");
       // Display is ramping up from idle.
       // Client realizes need for resync upon change in config.
@@ -316,7 +332,7 @@ HWC2::Error HWCDisplayBuiltIn::Validate(uint32_t *out_num_types, uint32_t *out_n
       DTRACE_END();
     }
     // On success, set current refresh rate to new refresh rate.
-    current_refresh_rate_ = refresh_rate;
+    current_refresh_rate_ = new_refresh_rate;
   }
 
   if (layer_set_.empty()) {
